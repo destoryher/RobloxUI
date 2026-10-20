@@ -3756,7 +3756,7 @@ function KeyGate:_openLink(link)
 		copied = pcall(setclipboard, link.Url)
 	end
 	if copied then
-		self:SetStatus(link.Name .. " link copied to your clipboard.", "Info")
+		self:SetStatus(link.Message or (link.Name .. " link copied to your clipboard."), "Info")
 	else
 		self:SetStatus(link.Url, "Info")
 	end
