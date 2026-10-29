@@ -2882,6 +2882,28 @@ local function actionButton(window, parent, order, glyph, hoverToken, onClick)
 	return button
 end
 
+-- Shared minimized look: window fill, accent gradient border.
+local function styleShell(theme, frame)
+	theme:Bind(frame, {
+		BackgroundColor3 = "Window",
+		BackgroundTransparency = function(t)
+			return t.Transparency.Pill
+		end,
+	})
+	local stroke = Create.new("UIStroke", {
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Thickness = 2,
+		Color = Color3.new(1, 1, 1),
+		Parent = frame,
+	})
+	local gradient = Create.new("UIGradient", { Parent = stroke })
+	theme:Bind(gradient, {
+		Color = function(t)
+			return ColorSequence.new(t.Colors.Accent, t.Colors.AccentAlt)
+		end,
+	})
+end
+
 local function buildPill(self, window, cfg)
 	local theme = window.Theme
 	self.Height = window._ctx.Touch and 48 or 44
@@ -2895,25 +2917,8 @@ local function buildPill(self, window, cfg)
 		ZIndex = 20,
 		Parent = window._root,
 	})
-	theme:Bind(frame, {
-		BackgroundColor3 = "Window",
-		BackgroundTransparency = function(t)
-			return t.Transparency.Pill
-		end,
-	})
+	styleShell(theme, frame)
 	Create.Corner(frame, UDim.new(1, 0))
-	local stroke = Create.new("UIStroke", {
-		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-		Thickness = 2,
-		Color = Color3.new(1, 1, 1),
-		Parent = frame,
-	})
-	local gradient = Create.new("UIGradient", { Parent = stroke })
-	theme:Bind(gradient, {
-		Color = function(t)
-			return ColorSequence.new(t.Colors.Accent, t.Colors.AccentAlt)
-		end,
-	})
 	local list = Create.List(frame, Enum.FillDirection.Horizontal, 0)
 	list.VerticalAlignment = Enum.VerticalAlignment.Center
 
@@ -2955,10 +2960,13 @@ local function buildPill(self, window, cfg)
 		Parent = content,
 	})
 	theme:Text(title, "Text", "Medium", "Body")
+	self.TitleLabel = title
 
 	window._maid:Give(theme:Watch(function(t)
 		Glyphs.paint(moveParts, t.Colors.TextMuted)
-		icon:Paint(t.Colors.Accent)
+		if icon.Kind ~= "image" then
+			icon:Paint(t.Colors.Accent)
+		end
 	end))
 
 	self.Frame = frame
@@ -2969,7 +2977,7 @@ end
 
 local function buildBar(self, window, cfg)
 	local theme = window.Theme
-	self.Height = window._ctx.Touch and 46 or 40
+	self.Height = window._ctx.Touch and 46 or 42
 	self.BarWidth = BAR_WIDTH
 
 	local frame = Create.new("Frame", {
@@ -2980,19 +2988,48 @@ local function buildBar(self, window, cfg)
 		ZIndex = 20,
 		Parent = window._root,
 	})
-	theme:Bind(frame, { BackgroundColor3 = "Control" })
+	styleShell(theme, frame)
 	theme:Corner(frame, "Window")
-	theme:Stroke(frame, "Stroke", 1)
 
-	local title = Create.new("TextLabel", {
-		Name = "Title",
-		Position = UDim2.new(0, 18, 0, 0),
-		Size = UDim2.new(1, -(18 + 116), 1, 0),
-		Text = cfg.Title,
-		TextTruncate = Enum.TextTruncate.AtEnd,
+	local icon = Icons.Make(frame, cfg.FabIcon or cfg.Icon, cfg.Title, 26, { Tint = false, Corner = 6, Theme = theme })
+	icon.Frame.AnchorPoint = Vector2.new(0, 0.5)
+	icon.Frame.Position = UDim2.new(0, 12, 0.5, 0)
+	window._maid:Give(theme:Watch(function(t)
+		if icon.Kind ~= "image" then
+			icon:Paint(t.Colors.Accent)
+		end
+	end))
+
+	local text = Create.new("Frame", {
+		Name = "Text",
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		Position = UDim2.new(0, 48, 0, 0),
+		Size = UDim2.new(1, -(48 + 116), 1, 0),
 		Parent = frame,
 	})
-	theme:Text(title, "Text", "Medium", "Body")
+	local textList = Create.List(text, Enum.FillDirection.Horizontal, 8)
+	textList.VerticalAlignment = Enum.VerticalAlignment.Center
+	local title = Create.new("TextLabel", {
+		Name = "Title",
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		Text = cfg.Title,
+		LayoutOrder = 1,
+		Parent = text,
+	})
+	theme:Text(title, "Text", "Bold", "Body")
+	local subtitle = Create.new("TextLabel", {
+		Name = "Subtitle",
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		Text = cfg.Subtitle or "",
+		Visible = cfg.Subtitle ~= nil and cfg.Subtitle ~= "",
+		LayoutOrder = 2,
+		Parent = text,
+	})
+	theme:Text(subtitle, "TextDim", "Regular", "Small")
+	self.TitleLabel, self.SubtitleLabel = title, subtitle
 
 	local actions = Create.new("Frame", {
 		Name = "Actions",
@@ -7656,11 +7693,23 @@ function Window:Confirm(cfg)
 end
 
 function Window:SetTitle(text)
-	self._brandTitle.Text = tostring(text)
+	text = tostring(text)
+	self._brandTitle.Text = text
+	self._cfg.Title = text
+	if self._dock and self._dock.TitleLabel then
+		self._dock.TitleLabel.Text = text
+	end
 end
 
 function Window:SetSubtitle(text)
-	self._brandSubtitle.Text = tostring(text)
+	text = tostring(text)
+	self._brandSubtitle.Text = text
+	self._cfg.Subtitle = text
+	local label = self._dock and self._dock.SubtitleLabel
+	if label then
+		label.Text = text
+		label.Visible = text ~= ""
+	end
 end
 
 function Window:SetColor(token, color)
@@ -9076,7 +9125,7 @@ local Luarmor = require("providers/luarmor")
 local Env = require("util/env")
 
 local VERSION = "0.9.0"
-local BUILD = "67ab4e5c8bff"
+local BUILD = "fe825384c466"
 
 local Library = {
 	Version = VERSION,

@@ -1180,11 +1180,23 @@ function Window:Confirm(cfg)
 end
 
 function Window:SetTitle(text)
-	self._brandTitle.Text = tostring(text)
+	text = tostring(text)
+	self._brandTitle.Text = text
+	self._cfg.Title = text
+	if self._dock and self._dock.TitleLabel then
+		self._dock.TitleLabel.Text = text
+	end
 end
 
 function Window:SetSubtitle(text)
-	self._brandSubtitle.Text = tostring(text)
+	text = tostring(text)
+	self._brandSubtitle.Text = text
+	self._cfg.Subtitle = text
+	local label = self._dock and self._dock.SubtitleLabel
+	if label then
+		label.Text = text
+		label.Visible = text ~= ""
+	end
 end
 
 function Window:SetColor(token, color)
