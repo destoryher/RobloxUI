@@ -2,6 +2,7 @@ local Create = require("util/create")
 local Maid = require("util/maid")
 local Tween = require("util/tween")
 local Validate = require("util/validate")
+local Fit = require("util/fit")
 local Icons = require("core/icons")
 local Toggle = require("components/toggle")
 local Button = require("components/button")
@@ -112,6 +113,16 @@ function Card.new(tab, cfg, column)
 	})
 	theme:Text(title, "Text", "Bold", "Header")
 	self._title = title
+	Fit.bind({
+		label = title,
+		container = header,
+		base = sp.Header,
+		reserve = titleX + 40,
+		maid = self._maid,
+		scale = function()
+			return window:_textScale()
+		end,
+	})
 
 	local chevron = Create.new("TextLabel", {
 		Name = "Chevron",

@@ -11,4 +11,5 @@ return {
 	CoreGui = get("CoreGui"),
 	Workspace = get("Workspace"),
 	GuiService = get("GuiService"),
+	TextService = get("TextService"),
 }

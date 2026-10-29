@@ -607,8 +607,21 @@ local function build(cfg, partial)
 	self._maid:Give(hamburger.Activated:Connect(function()
 		self:SetSidebarCollapsed(not self._userRail)
 	end))
+	-- filter after a short pause in typing, not on every keystroke
+	local searchToken = 0
 	self._maid:Give(searchBox:GetPropertyChangedSignal("Text"):Connect(function()
-		self:_filter(searchBox.Text)
+		searchToken = searchToken + 1
+		local token = searchToken
+		local text = searchBox.Text
+		if text == "" then
+			self:_filter("")
+			return
+		end
+		task.delay(0.12, function()
+			if token == searchToken and not self._destroyed then
+				self:_filter(text)
+			end
+		end)
 	end))
 	self._maid:Give(gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 		self:_closePopup()
@@ -674,6 +687,16 @@ function Window:_updateScale()
 	self._uiScale = scale
 	self._rootScale.Scale = scale
 	self._root.Size = UDim2.fromOffset(abs.X / scale, abs.Y / scale)
+end
+
+-- Factor between unscaled layout pixels and absolute pixels, or nil while the open/close animation runs
+-- (text is re-fitted once the animation settles, instead of every frame).
+function Window:_textScale()
+	local anim = self._scale.Scale
+	if anim < 0.999 then
+		return nil
+	end
+	return math.max(self._uiScale * anim, 0.01)
 end
 
 function Window:_viewport()

@@ -49,8 +49,10 @@ Created on a card with `card:CreateX(config)`.
 | `CreateKeybind` | `Default`, `Callback`, `Pressed` | `Enum.KeyCode` |
 | `CreateColorPicker` | `Default` | `Color3` |
 | `CreateProgress` | `Min`, `Max`, `Value`, `Format` | number |
-| `CreateStat` | `Name`, `Value`, `Style` | text |
+| `CreateStat` | `Name`, `Value`, `Style` (change later with `SetStyle`) | text |
 | `CreateLabel`, `CreateParagraph`, `CreateDivider` | `Text`, `Title`, `Content` | text |
+
+Long names, button text and card titles wrap onto a second line instead of being cut off with "..."; stat and progress values only take the width they need.
 
 All controls support `Get`, `Set(value, silent)`, `SetName`, `SetDescription`, `SetDisabled`, `SetVisible` and `Destroy`. Callbacks run in their own thread inside `pcall`. Dropdowns and chips also provide `SetOptions`, `SelectAll` and `Clear`.
 

@@ -1,5 +1,6 @@
 local Create = require("util/create")
 local Maid = require("util/maid")
+local Fit = require("util/fit")
 
 local Control = {}
 Control.__index = Control
@@ -58,12 +59,33 @@ function Control:_rerender(animate)
 	end
 end
 
-function Control:_addName(reserve)
+-- Long text wraps onto extra lines and the header grows, instead of being cut off with "...".
+-- `reserve` is the space kept free on the right (number, or function(width) -> number).
+function Control:_fitHeader(label, reserve, opts)
+	opts = opts or {}
+	local window = self._ctx.Window
+	self._fitter = Fit.bind({
+		label = label,
+		container = self.Header,
+		base = self.Header.Size.Y.Offset,
+		reserve = reserve,
+		padX = opts.padX,
+		sizeLabel = opts.sizeLabel,
+		watch = opts.watch,
+		maid = self._maid,
+		scale = function()
+			return window:_textScale()
+		end,
+	})
+	return self._fitter
+end
+
+function Control:_addName(reserve, opts)
+	local fixed = type(reserve) == "number" and reserve or 0
 	local label = Create.new("TextLabel", {
 		Name = "Name",
-		Size = UDim2.new(1, -(reserve or 0), 1, 0),
+		Size = UDim2.new(1, -fixed, 1, 0),
 		Text = self._name,
-		TextTruncate = Enum.TextTruncate.AtEnd,
 		Parent = self.Header,
 	})
 	self._ctx.Theme:Bind(label, {
@@ -78,6 +100,8 @@ function Control:_addName(reserve)
 	self:_onRender(function(theme)
 		label.TextColor3 = self._disabled and theme.Colors.TextMuted or theme.Colors.Text
 	end)
+	opts = opts or {}
+	self:_fitHeader(label, reserve or 0, { sizeLabel = true, watch = opts.watch })
 	return label
 end
 

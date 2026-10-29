@@ -49,6 +49,7 @@ function Button.new(card, cfg)
 		Parent = self.Header,
 	})
 	theme:Corner(button, "Control")
+	Create.Padding(button, 12, 0, 12, 0)
 	local stroke = theme:Stroke(button, "Stroke", 1)
 	theme:Bind(button, {
 		Font = function(t)
@@ -59,6 +60,8 @@ function Button.new(card, cfg)
 		end,
 	})
 	self._nameLabel = button
+	-- long button text wraps onto a second line instead of spilling past the edges
+	self:_fitHeader(button, 0, { padX = 24 })
 
 	self._maid:Give(button.MouseEnter:Connect(function()
 		self._hover = true
@@ -1399,7 +1402,6 @@ function Keybind:Set(key, silent)
 	end
 	self._key = key
 	self:_rerender(true)
-	self:_emit(key)
 	if not silent then
 		self:_fire(key)
 	end
@@ -1545,6 +1547,7 @@ local Control = require("core/control")
 local Create = require("util/create")
 local Validate = require("util/validate")
 local Tween = require("util/tween")
+local Fit = require("util/fit")
 
 local Progress = setmetatable({}, { __index = Control })
 Progress.__index = Progress
@@ -1580,7 +1583,6 @@ function Progress.new(card, cfg)
 	self._format = cfg.Format or "{value} / {max}"
 
 	self:_compactHeader()
-	self:_addName(110)
 	local valueLabel = Create.new("TextLabel", {
 		Name = "Value",
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -1591,6 +1593,13 @@ function Progress.new(card, cfg)
 		Parent = self.Header,
 	})
 	self:_style(valueLabel, "Medium", "Body")
+	-- the value text gets the width it needs (up to half the row); the name gets the rest
+	self:_addName(function(width)
+		local needed = valueLabel.Text == "" and 0 or Fit.width(valueLabel.Text, valueLabel.TextSize, valueLabel.Font) + 2
+		local valueW = math.min(needed, math.floor(width * 0.5))
+		valueLabel.Size = UDim2.new(0, valueW, 1, 0)
+		return valueW > 0 and valueW + 12 or 0
+	end, { watch = { valueLabel } })
 
 	local field = self:_addField(12)
 	local track = Create.new("Frame", {
@@ -1642,7 +1651,12 @@ function Progress:Set(value, text)
 	if type(value) ~= "number" then
 		error("[UI] Progress:Set expects a number", 0)
 	end
-	self._value = math.clamp(value, self._min, self._max)
+	value = math.clamp(value, self._min, self._max)
+	-- scripts often call Set every frame; skip the re-render and tween when nothing changed
+	if value == self._value and text == self._text then
+		return
+	end
+	self._value = value
 	self._text = text
 	self:_rerender(true)
 end
@@ -1877,6 +1891,7 @@ __defs["components/stat"] = function()
 local Control = require("core/control")
 local Create = require("util/create")
 local Validate = require("util/validate")
+local Fit = require("util/fit")
 
 local Stat = setmetatable({}, { __index = Control })
 Stat.__index = Stat
@@ -1891,8 +1906,6 @@ function Stat.new(card, cfg)
 	end
 	local self = Control.base(card, cfg, "Stat", Stat)
 	self.Header.Size = UDim2.new(1, 0, 0, self._ctx.Touch and 30 or 24)
-	self:_addName(0)
-	self._nameLabel.Size = UDim2.new(0.5, -4, 1, 0)
 	self._style_ = style
 
 	local value = Create.new("TextLabel", {
@@ -1908,10 +1921,18 @@ function Stat.new(card, cfg)
 	self:_style(value, "Medium", "Body")
 	self._value = value
 
+	-- The value takes the width it needs (up to 60% of the row); the name gets the rest and wraps if it must.
+	self:_addName(function(width)
+		local needed = value.Text == "" and 0 or Fit.width(value.Text, value.TextSize, value.Font) + 2
+		local valueW = math.min(needed, math.floor(width * 0.6))
+		value.Size = UDim2.new(0, valueW, 1, 0)
+		return valueW > 0 and valueW + 12 or 0
+	end, { watch = { value } })
+
 	self:_onRender(function(t)
 		local c = t.Colors
 		self._nameLabel.TextColor3 = self._disabled and c.TextMuted or c.TextDim
-		value.TextColor3 = self._disabled and c.TextMuted or c[STYLES[style]]
+		value.TextColor3 = self._disabled and c.TextMuted or c[STYLES[self._style_]]
 	end)
 	return self:_finish(cfg)
 end
@@ -1921,7 +1942,18 @@ function Stat:Get()
 end
 
 function Stat:Set(value)
-	self._value.Text = tostring(value)
+	local text = tostring(value)
+	if self._value.Text ~= text then
+		self._value.Text = text
+	end
+end
+
+function Stat:SetStyle(style)
+	if not STYLES[style] then
+		error(("[UI] Stat:SetStyle: Style must be Normal, Accent, Success or Danger (got '%s')"):format(tostring(style)), 0)
+	end
+	self._style_ = style
+	self:_rerender(false)
 end
 
 return Stat
@@ -2024,7 +2056,6 @@ function Toggle:Set(value, silent)
 	end
 	self._value = value
 	self:_rerender(true)
-	self:_emit(value)
 	if not silent then
 		self:_fire(value)
 	end
@@ -2038,6 +2069,7 @@ local Create = require("util/create")
 local Maid = require("util/maid")
 local Tween = require("util/tween")
 local Validate = require("util/validate")
+local Fit = require("util/fit")
 local Icons = require("core/icons")
 local Toggle = require("components/toggle")
 local Button = require("components/button")
@@ -2148,6 +2180,16 @@ function Card.new(tab, cfg, column)
 	})
 	theme:Text(title, "Text", "Bold", "Header")
 	self._title = title
+	Fit.bind({
+		label = title,
+		container = header,
+		base = sp.Header,
+		reserve = titleX + 40,
+		maid = self._maid,
+		scale = function()
+			return window:_textScale()
+		end,
+	})
 
 	local chevron = Create.new("TextLabel", {
 		Name = "Chevron",
@@ -2345,6 +2387,7 @@ end
 __defs["core/control"] = function()
 local Create = require("util/create")
 local Maid = require("util/maid")
+local Fit = require("util/fit")
 
 local Control = {}
 Control.__index = Control
@@ -2403,12 +2446,33 @@ function Control:_rerender(animate)
 	end
 end
 
-function Control:_addName(reserve)
+-- Long text wraps onto extra lines and the header grows, instead of being cut off with "...".
+-- `reserve` is the space kept free on the right (number, or function(width) -> number).
+function Control:_fitHeader(label, reserve, opts)
+	opts = opts or {}
+	local window = self._ctx.Window
+	self._fitter = Fit.bind({
+		label = label,
+		container = self.Header,
+		base = self.Header.Size.Y.Offset,
+		reserve = reserve,
+		padX = opts.padX,
+		sizeLabel = opts.sizeLabel,
+		watch = opts.watch,
+		maid = self._maid,
+		scale = function()
+			return window:_textScale()
+		end,
+	})
+	return self._fitter
+end
+
+function Control:_addName(reserve, opts)
+	local fixed = type(reserve) == "number" and reserve or 0
 	local label = Create.new("TextLabel", {
 		Name = "Name",
-		Size = UDim2.new(1, -(reserve or 0), 1, 0),
+		Size = UDim2.new(1, -fixed, 1, 0),
 		Text = self._name,
-		TextTruncate = Enum.TextTruncate.AtEnd,
 		Parent = self.Header,
 	})
 	self._ctx.Theme:Bind(label, {
@@ -2423,6 +2487,8 @@ function Control:_addName(reserve)
 	self:_onRender(function(theme)
 		label.TextColor3 = self._disabled and theme.Colors.TextMuted or theme.Colors.Text
 	end)
+	opts = opts or {}
+	self:_fitHeader(label, reserve or 0, { sizeLabel = true, watch = opts.watch })
 	return label
 end
 
@@ -2438,34 +2504,6 @@ function Control:_fire(...)
 			warn(("[UI] callback for '%s' errored: %s"):format(name, tostring(err)))
 		end
 	end, ...)
-end
-
-function Control:OnChange(fn)
-	local listeners = self._listeners
-	if not listeners then
-		listeners = {}
-		self._listeners = listeners
-	end
-	local handle = {}
-	listeners[handle] = fn
-	function handle.Disconnect()
-		listeners[handle] = nil
-	end
-	handle.Destroy = handle.Disconnect
-	return handle
-end
-
-function Control:_emit(...)
-	local listeners = self._listeners
-	if not listeners then
-		return
-	end
-	for _, fn in pairs(listeners) do
-		local ok, err = pcall(fn, ...)
-		if not ok then
-			warn(("[UI] OnChange listener for '%s' errored: %s"):format(self._name, tostring(err)))
-		end
-	end
 end
 
 function Control:_finish(cfg)
@@ -5224,7 +5262,6 @@ local ThemeManager = require("theme/manager")
 local Icons = require("core/icons")
 local Tab = require("core/tab")
 local Dock = require("core/dock")
-local KeyList = require("core/keylist")
 local Mount = require("util/mount")
 local Effects = require("core/effects")
 local Toast = require("core/toast")
@@ -5824,8 +5861,21 @@ local function build(cfg, partial)
 	self._maid:Give(hamburger.Activated:Connect(function()
 		self:SetSidebarCollapsed(not self._userRail)
 	end))
+	-- filter after a short pause in typing, not on every keystroke
+	local searchToken = 0
 	self._maid:Give(searchBox:GetPropertyChangedSignal("Text"):Connect(function()
-		self:_filter(searchBox.Text)
+		searchToken = searchToken + 1
+		local token = searchToken
+		local text = searchBox.Text
+		if text == "" then
+			self:_filter("")
+			return
+		end
+		task.delay(0.12, function()
+			if token == searchToken and not self._destroyed then
+				self:_filter(text)
+			end
+		end)
 	end))
 	self._maid:Give(gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 		self:_closePopup()
@@ -5891,6 +5941,16 @@ function Window:_updateScale()
 	self._uiScale = scale
 	self._rootScale.Scale = scale
 	self._root.Size = UDim2.fromOffset(abs.X / scale, abs.Y / scale)
+end
+
+-- Factor between unscaled layout pixels and absolute pixels, or nil while the open/close animation runs
+-- (text is re-fitted once the animation settles, instead of every frame).
+function Window:_textScale()
+	local anim = self._scale.Scale
+	if anim < 0.999 then
+		return nil
+	end
+	return math.max(self._uiScale * anim, 0.01)
 end
 
 function Window:_viewport()
@@ -6035,17 +6095,11 @@ function Window:_placeFab()
 	if self._dock and self._dock.Frame.Visible then
 		self._dock:Place()
 	end
-	if self._keylist and self._keylist.Frame.Visible then
-		self._keylist:_place()
-	end
 end
 
 function Window:_transition(state)
 	self:_closePopup()
 	self._state = state
-	if self._keylist then
-		self._keylist:_sync()
-	end
 	self._token = self._token + 1
 	local token = self._token
 	local anim = self.Theme:Get().Animation
@@ -6311,22 +6365,6 @@ function Window:Notify(cfg)
 		return nil
 	end
 	return self._toasts:Push(cfg)
-end
-
-function Window:CreateKeybindList(cfg)
-	if self._destroyed then
-		return nil
-	end
-	if self._keylist then
-		self._keylist:Destroy()
-	end
-	self._keylist = KeyList.new(self, cfg or {})
-	self._keylist:_sync()
-	return self._keylist
-end
-
-function Window:GetKeybindList()
-	return self._keylist
 end
 
 function Window:Confirm(cfg)
@@ -6900,6 +6938,134 @@ return function()
 end
 end
 
+__defs["util/fit"] = function()
+-- Text measuring and wrapping. Instead of cutting text off with "...",
+-- labels wrap onto extra lines and their row grows to fit them.
+local TextService = require("util/services").TextService
+
+local Fit = {}
+
+local HUGE = 100000
+local cache = {}
+local cacheSize = 0
+
+local function measure(text, size, font, width)
+	local key = text .. "\0" .. tostring(size) .. "\0" .. tostring(font) .. "\0" .. tostring(width)
+	local hit = cache[key]
+	if hit then
+		return hit
+	end
+	if not TextService then
+		return nil
+	end
+	local ok, result = pcall(TextService.GetTextSize, TextService, text, size, font, Vector2.new(width, HUGE))
+	if not ok then
+		return nil
+	end
+	if cacheSize >= 512 then
+		cache, cacheSize = {}, 0
+	end
+	cache[key] = result
+	cacheSize = cacheSize + 1
+	return result
+end
+
+-- Width of `text` on one line, in unscaled pixels.
+function Fit.width(text, size, font)
+	local bounds = measure(text, size, font, HUGE)
+	return bounds and math.ceil(bounds.X) or #text * size * 0.55
+end
+
+-- Height of `text` when wrapped to `width` unscaled pixels.
+function Fit.height(text, size, font, width)
+	local bounds = measure(text, size, font, math.max(math.floor(width), 1))
+	return bounds and math.ceil(bounds.Y) or size
+end
+
+-- Keeps `container` tall enough for `label` to wrap its text onto several lines.
+-- A single line keeps the container at `base` height; every extra line adds its height on top.
+-- opts:
+--   label, container, base, maid
+--   scale()      returns the current unscaled-to-absolute factor, or nil while the window animates
+--   reserve      pixels kept free next to the label (number, or function(width) -> number)
+--   padX         horizontal padding inside the label
+--   sizeLabel    set the label width to the container width minus `reserve`
+--   watch        extra TextLabels whose text affects `reserve`
+function Fit.bind(opts)
+	local label, container = opts.label, opts.container
+	label.TextWrapped = true
+	label.TextTruncate = Enum.TextTruncate.None
+
+	local lastKey
+	local queued = false
+
+	local function refit()
+		queued = false
+		if not label.Parent or not container.Parent then
+			return
+		end
+		local scale = opts.scale()
+		if not scale then
+			return
+		end
+		local width = math.floor(container.AbsoluteSize.X / scale + 0.5)
+		if width <= 0 then
+			return
+		end
+		local reserve = opts.reserve or 0
+		if type(reserve) == "function" then
+			reserve = reserve(width)
+		end
+		local avail = math.max(width - reserve - (opts.padX or 0), 1)
+		local text, size, font = label.Text, label.TextSize, label.Font
+		local key = table.concat({ text, tostring(size), tostring(font), tostring(avail), tostring(reserve) }, "\0")
+		if key == lastKey then
+			return
+		end
+		lastKey = key
+		if opts.sizeLabel then
+			label.Size = UDim2.new(1, -reserve, label.Size.Y.Scale, label.Size.Y.Offset)
+		end
+		local line = Fit.height("Ag", size, font, HUGE)
+		local height = Fit.height(text ~= "" and text or "Ag", size, font, avail)
+		local extra = math.max(height - line, 0)
+		local current = container.Size
+		local target = opts.base + extra
+		if current.Y.Offset ~= target or current.Y.Scale ~= 0 then
+			container.Size = UDim2.new(current.X.Scale, current.X.Offset, 0, target)
+		end
+	end
+
+	local function queue()
+		if queued then
+			return
+		end
+		queued = true
+		task.defer(refit)
+	end
+
+	local maid = opts.maid
+	maid:Give(container:GetPropertyChangedSignal("AbsoluteSize"):Connect(queue))
+	for _, prop in ipairs({ "Text", "TextSize", "Font" }) do
+		maid:Give(label:GetPropertyChangedSignal(prop):Connect(queue))
+	end
+	for _, other in ipairs(opts.watch or {}) do
+		maid:Give(other:GetPropertyChangedSignal("Text"):Connect(queue))
+		maid:Give(other:GetPropertyChangedSignal("TextSize"):Connect(queue))
+	end
+	queue()
+
+	return {
+		Refit = function()
+			lastKey = nil
+			queue()
+		end,
+	}
+end
+
+return Fit
+end
+
 __defs["util/glyphs"] = function()
 local Create = require("util/create")
 
@@ -7211,6 +7377,7 @@ return {
 	CoreGui = get("CoreGui"),
 	Workspace = get("Workspace"),
 	GuiService = get("GuiService"),
+	TextService = get("TextService"),
 }
 end
 
@@ -7298,8 +7465,8 @@ local KeyGate = require("core/keygate")
 local Luarmor = require("providers/luarmor")
 local Env = require("util/env")
 
-local VERSION = "0.8.0"
-local BUILD = "f2e0a956f507"
+local VERSION = "0.9.0"
+local BUILD = "1578faee6170"
 
 local Library = {
 	Version = VERSION,

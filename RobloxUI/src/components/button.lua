@@ -34,6 +34,7 @@ function Button.new(card, cfg)
 		Parent = self.Header,
 	})
 	theme:Corner(button, "Control")
+	Create.Padding(button, 12, 0, 12, 0)
 	local stroke = theme:Stroke(button, "Stroke", 1)
 	theme:Bind(button, {
 		Font = function(t)
@@ -44,6 +45,8 @@ function Button.new(card, cfg)
 		end,
 	})
 	self._nameLabel = button
+	-- long button text wraps onto a second line instead of spilling past the edges
+	self:_fitHeader(button, 0, { padX = 24 })
 
 	self._maid:Give(button.MouseEnter:Connect(function()
 		self._hover = true

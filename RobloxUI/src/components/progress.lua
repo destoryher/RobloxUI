@@ -2,6 +2,7 @@ local Control = require("core/control")
 local Create = require("util/create")
 local Validate = require("util/validate")
 local Tween = require("util/tween")
+local Fit = require("util/fit")
 
 local Progress = setmetatable({}, { __index = Control })
 Progress.__index = Progress
@@ -37,7 +38,6 @@ function Progress.new(card, cfg)
 	self._format = cfg.Format or "{value} / {max}"
 
 	self:_compactHeader()
-	self:_addName(110)
 	local valueLabel = Create.new("TextLabel", {
 		Name = "Value",
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -48,6 +48,13 @@ function Progress.new(card, cfg)
 		Parent = self.Header,
 	})
 	self:_style(valueLabel, "Medium", "Body")
+	-- the value text gets the width it needs (up to half the row); the name gets the rest
+	self:_addName(function(width)
+		local needed = valueLabel.Text == "" and 0 or Fit.width(valueLabel.Text, valueLabel.TextSize, valueLabel.Font) + 2
+		local valueW = math.min(needed, math.floor(width * 0.5))
+		valueLabel.Size = UDim2.new(0, valueW, 1, 0)
+		return valueW > 0 and valueW + 12 or 0
+	end, { watch = { valueLabel } })
 
 	local field = self:_addField(12)
 	local track = Create.new("Frame", {
@@ -99,7 +106,12 @@ function Progress:Set(value, text)
 	if type(value) ~= "number" then
 		error("[UI] Progress:Set expects a number", 0)
 	end
-	self._value = math.clamp(value, self._min, self._max)
+	value = math.clamp(value, self._min, self._max)
+	-- scripts often call Set every frame; skip the re-render and tween when nothing changed
+	if value == self._value and text == self._text then
+		return
+	end
+	self._value = value
 	self._text = text
 	self:_rerender(true)
 end
