@@ -94,6 +94,7 @@ function Toggle:Set(value, silent)
 	end
 	self._value = value
 	self:_rerender(true)
+	self:_emit(value)
 	if not silent then
 		self:_fire(value)
 	end

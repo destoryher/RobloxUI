@@ -1402,6 +1402,7 @@ function Keybind:Set(key, silent)
 	end
 	self._key = key
 	self:_rerender(true)
+	self:_emit(key)
 	if not silent then
 		self:_fire(key)
 	end
@@ -2056,6 +2057,7 @@ function Toggle:Set(value, silent)
 	end
 	self._value = value
 	self:_rerender(true)
+	self:_emit(value)
 	if not silent then
 		self:_fire(value)
 	end
@@ -2504,6 +2506,34 @@ function Control:_fire(...)
 			warn(("[UI] callback for '%s' errored: %s"):format(name, tostring(err)))
 		end
 	end, ...)
+end
+
+function Control:OnChange(fn)
+	local listeners = self._listeners
+	if not listeners then
+		listeners = {}
+		self._listeners = listeners
+	end
+	local handle = {}
+	listeners[handle] = fn
+	function handle.Disconnect()
+		listeners[handle] = nil
+	end
+	handle.Destroy = handle.Disconnect
+	return handle
+end
+
+function Control:_emit(...)
+	local listeners = self._listeners
+	if not listeners then
+		return
+	end
+	for _, fn in pairs(listeners) do
+		local ok, err = pcall(fn, ...)
+		if not ok then
+			warn(("[UI] OnChange listener for '%s' errored: %s"):format(self._name, tostring(err)))
+		end
+	end
 end
 
 function Control:_finish(cfg)
@@ -5262,6 +5292,7 @@ local ThemeManager = require("theme/manager")
 local Icons = require("core/icons")
 local Tab = require("core/tab")
 local Dock = require("core/dock")
+local KeyList = require("core/keylist")
 local Mount = require("util/mount")
 local Effects = require("core/effects")
 local Toast = require("core/toast")
@@ -6095,11 +6126,17 @@ function Window:_placeFab()
 	if self._dock and self._dock.Frame.Visible then
 		self._dock:Place()
 	end
+	if self._keylist and self._keylist.Frame.Visible then
+		self._keylist:_place()
+	end
 end
 
 function Window:_transition(state)
 	self:_closePopup()
 	self._state = state
+	if self._keylist then
+		self._keylist:_sync()
+	end
 	self._token = self._token + 1
 	local token = self._token
 	local anim = self.Theme:Get().Animation
@@ -6365,6 +6402,22 @@ function Window:Notify(cfg)
 		return nil
 	end
 	return self._toasts:Push(cfg)
+end
+
+function Window:CreateKeybindList(cfg)
+	if self._destroyed then
+		return nil
+	end
+	if self._keylist then
+		self._keylist:Destroy()
+	end
+	self._keylist = KeyList.new(self, cfg or {})
+	self._keylist:_sync()
+	return self._keylist
+end
+
+function Window:GetKeybindList()
+	return self._keylist
 end
 
 function Window:Confirm(cfg)
@@ -7466,7 +7519,7 @@ local Luarmor = require("providers/luarmor")
 local Env = require("util/env")
 
 local VERSION = "0.9.0"
-local BUILD = "1578faee6170"
+local BUILD = "e1a2d54e3015"
 
 local Library = {
 	Version = VERSION,

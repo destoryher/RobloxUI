@@ -106,6 +106,7 @@ function Keybind:Set(key, silent)
 	end
 	self._key = key
 	self:_rerender(true)
+	self:_emit(key)
 	if not silent then
 		self:_fire(key)
 	end

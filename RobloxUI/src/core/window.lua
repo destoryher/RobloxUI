@@ -8,6 +8,7 @@ local ThemeManager = require("theme/manager")
 local Icons = require("core/icons")
 local Tab = require("core/tab")
 local Dock = require("core/dock")
+local KeyList = require("core/keylist")
 local Mount = require("util/mount")
 local Effects = require("core/effects")
 local Toast = require("core/toast")
@@ -841,11 +842,17 @@ function Window:_placeFab()
 	if self._dock and self._dock.Frame.Visible then
 		self._dock:Place()
 	end
+	if self._keylist and self._keylist.Frame.Visible then
+		self._keylist:_place()
+	end
 end
 
 function Window:_transition(state)
 	self:_closePopup()
 	self._state = state
+	if self._keylist then
+		self._keylist:_sync()
+	end
 	self._token = self._token + 1
 	local token = self._token
 	local anim = self.Theme:Get().Animation
@@ -1111,6 +1118,22 @@ function Window:Notify(cfg)
 		return nil
 	end
 	return self._toasts:Push(cfg)
+end
+
+function Window:CreateKeybindList(cfg)
+	if self._destroyed then
+		return nil
+	end
+	if self._keylist then
+		self._keylist:Destroy()
+	end
+	self._keylist = KeyList.new(self, cfg or {})
+	self._keylist:_sync()
+	return self._keylist
+end
+
+function Window:GetKeybindList()
+	return self._keylist
 end
 
 function Window:Confirm(cfg)

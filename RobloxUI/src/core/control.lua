@@ -119,6 +119,34 @@ function Control:_fire(...)
 	end, ...)
 end
 
+function Control:OnChange(fn)
+	local listeners = self._listeners
+	if not listeners then
+		listeners = {}
+		self._listeners = listeners
+	end
+	local handle = {}
+	listeners[handle] = fn
+	function handle.Disconnect()
+		listeners[handle] = nil
+	end
+	handle.Destroy = handle.Disconnect
+	return handle
+end
+
+function Control:_emit(...)
+	local listeners = self._listeners
+	if not listeners then
+		return
+	end
+	for _, fn in pairs(listeners) do
+		local ok, err = pcall(fn, ...)
+		if not ok then
+			warn(("[UI] OnChange listener for '%s' errored: %s"):format(self._name, tostring(err)))
+		end
+	end
+end
+
 function Control:_finish(cfg)
 	if cfg.Description then
 		self:SetDescription(cfg.Description)
