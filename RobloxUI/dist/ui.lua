@@ -49,6 +49,7 @@ function Button.new(card, cfg)
 		Parent = self.Header,
 	})
 	theme:Corner(button, "Control")
+	Create.Padding(button, 12, 0, 12, 0)
 	local stroke = theme:Stroke(button, "Stroke", 1)
 	theme:Bind(button, {
 		Font = function(t)
@@ -59,6 +60,8 @@ function Button.new(card, cfg)
 		end,
 	})
 	self._nameLabel = button
+	-- long button text wraps onto a second line instead of spilling past the edges
+	self:_fitHeader(button, 0, { padX = 24 })
 
 	self._maid:Give(button.MouseEnter:Connect(function()
 		self._hover = true
@@ -1295,24 +1298,12 @@ local Control = require("core/control")
 local Create = require("util/create")
 local Validate = require("util/validate")
 local Services = require("util/services")
+local Keys = require("util/keys")
 
 local UserInputService = Services.UserInputService
 
 local Keybind = setmetatable({}, { __index = Control })
 Keybind.__index = Keybind
-
-local function toKey(value)
-	if value == nil then
-		return nil
-	end
-	if typeof(value) == "EnumItem" then
-		return value
-	end
-	if type(value) == "string" and Enum.KeyCode[value] then
-		return Enum.KeyCode[value]
-	end
-	error("[UI] Keybind: expected an Enum.KeyCode or a key name like \"F\"", 0)
-end
 
 function Keybind.new(card, cfg)
 	Validate.check("CreateKeybind", cfg, {
@@ -1320,14 +1311,19 @@ function Keybind.new(card, cfg)
 		Default = "EnumItem|string",
 		Callback = "function",
 		Pressed = "function",
+		Released = "function",
+		AllowMouse = "boolean",
 		Description = "string",
 		Disabled = "boolean",
 	})
 	local self = Control.base(card, cfg, "Keybind", Keybind)
 	local theme = self._ctx.Theme
-	self._key = toKey(cfg.Default)
+	self._key = Keys.parse(cfg.Default, "CreateKeybind", true)
 	self._listening = false
+	self._held = false
+	self._allowMouse = cfg.AllowMouse ~= false
 	self._pressed = cfg.Pressed
+	self._released = cfg.Released
 	self:_addName(100)
 
 	local button = Create.new("TextButton", {
@@ -1346,33 +1342,30 @@ function Keybind.new(card, cfg)
 		if self._disabled then
 			return
 		end
-		self._listening = not self._listening
-		self:_rerender(true)
+		self:_setListening(not self._listening)
 	end))
+	self._maid:Give(function()
+		self:_setListening(false)
+	end)
 
 	self._maid:Give(UserInputService.InputBegan:Connect(function(input, processed)
 		if self._listening then
-			if input.UserInputType == Enum.UserInputType.Keyboard then
-				self._listening = false
-				if input.KeyCode == Enum.KeyCode.Backspace or input.KeyCode == Enum.KeyCode.Delete then
-					self:Set(nil)
-				elseif input.KeyCode ~= Enum.KeyCode.Escape then
-					self:Set(input.KeyCode)
-				end
-				self:_rerender(true)
-			end
+			self:_capture(input, processed)
 			return
 		end
-		if processed or self._disabled or not self._key or not self._pressed then
+		if processed or self._disabled or not self._key or Keys.blocked(input) then
 			return
 		end
-		if input.KeyCode == self._key then
-			task.spawn(function()
-				local ok, err = pcall(self._pressed)
-				if not ok then
-					warn(("[UI] Pressed callback for '%s' errored: %s"):format(self._name, tostring(err)))
-				end
-			end)
+		if Keys.matches(input, self._key) then
+			self._held = true
+			self:_call(self._pressed, "Pressed")
+		end
+	end))
+
+	self._maid:Give(UserInputService.InputEnded:Connect(function(input)
+		if self._held and Keys.matches(input, self._key) then
+			self._held = false
+			self:_call(self._released, "Released")
 		end
 	end))
 
@@ -1381,28 +1374,87 @@ function Keybind.new(card, cfg)
 		button.BackgroundColor3 = self._listening and c.ControlHover or c.Control
 		button.BackgroundTransparency = self._disabled and 0.4 or 0
 		button.TextColor3 = self._listening and c.Accent or (self._key and c.Text or c.TextMuted)
-		button.Text = self._listening and "..." or (self._key and self._key.Name or "None")
+		button.Text = self._listening and "..." or Keys.text(self._key)
 		stroke.Color = self._listening and c.Accent or c.Stroke
 	end)
 
 	return self:_finish(cfg)
 end
 
+function Keybind:_setListening(listening, input)
+	listening = listening and true or false
+	if listening == self._listening then
+		return
+	end
+	self._listening = listening
+	if listening then
+		Keys.beginCapture()
+	else
+		Keys.endCapture(input)
+	end
+	if not self._destroyed then
+		self:_rerender(true)
+	end
+end
+
+-- While listening: Escape cancels, Backspace/Delete clears, any other key or mouse button binds.
+-- Mouse clicks on the menu itself are ignored so you can click away; click in the game to bind one.
+function Keybind:_capture(input, processed)
+	local key = Keys.fromInput(input)
+	if not key then
+		return
+	end
+	if Keys.isMouse(key) and (processed or not self._allowMouse) then
+		return
+	end
+	self:_setListening(false, input)
+	if key == Enum.KeyCode.Backspace or key == Enum.KeyCode.Delete then
+		self:Set(nil)
+	elseif key ~= Enum.KeyCode.Escape then
+		self:Set(key)
+	end
+end
+
+function Keybind:_call(fn, label)
+	if not fn then
+		return
+	end
+	task.spawn(function()
+		local ok, err = pcall(fn)
+		if not ok then
+			warn(("[UI] %s callback for '%s' errored: %s"):format(label, self._name, tostring(err)))
+		end
+	end)
+end
+
 function Keybind:Get()
 	return self._key
 end
 
+-- The bind as a string for configs ("F", "MouseButton2"), or "" when unbound. Set() accepts it back.
+function Keybind:GetKeyName()
+	return self._key and self._key.Name or ""
+end
+
+function Keybind:IsHeld()
+	return self._held
+end
+
 function Keybind:Set(key, silent)
-	key = toKey(key)
+	key = Keys.parse(key, "Keybind:Set")
 	if key == self._key then
 		return
 	end
+	if self._held then
+		self._held = false
+		self:_call(self._released, "Released")
+	end
 	self._key = key
 	self:_rerender(true)
-	self:_emit(key)
 	if not silent then
 		self:_fire(key)
 	end
+	self:_emit(key)
 end
 
 return Keybind
@@ -1545,6 +1597,7 @@ local Control = require("core/control")
 local Create = require("util/create")
 local Validate = require("util/validate")
 local Tween = require("util/tween")
+local Fit = require("util/fit")
 
 local Progress = setmetatable({}, { __index = Control })
 Progress.__index = Progress
@@ -1580,7 +1633,6 @@ function Progress.new(card, cfg)
 	self._format = cfg.Format or "{value} / {max}"
 
 	self:_compactHeader()
-	self:_addName(110)
 	local valueLabel = Create.new("TextLabel", {
 		Name = "Value",
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -1591,6 +1643,13 @@ function Progress.new(card, cfg)
 		Parent = self.Header,
 	})
 	self:_style(valueLabel, "Medium", "Body")
+	-- the value text gets the width it needs (up to half the row); the name gets the rest
+	self:_addName(function(width)
+		local needed = valueLabel.Text == "" and 0 or Fit.width(valueLabel.Text, valueLabel.TextSize, valueLabel.Font) + 2
+		local valueW = math.min(needed, math.floor(width * 0.5))
+		valueLabel.Size = UDim2.new(0, valueW, 1, 0)
+		return valueW > 0 and valueW + 12 or 0
+	end, { watch = { valueLabel } })
 
 	local field = self:_addField(12)
 	local track = Create.new("Frame", {
@@ -1642,7 +1701,12 @@ function Progress:Set(value, text)
 	if type(value) ~= "number" then
 		error("[UI] Progress:Set expects a number", 0)
 	end
-	self._value = math.clamp(value, self._min, self._max)
+	value = math.clamp(value, self._min, self._max)
+	-- scripts often call Set every frame; skip the re-render and tween when nothing changed
+	if value == self._value and text == self._text then
+		return
+	end
+	self._value = value
 	self._text = text
 	self:_rerender(true)
 end
@@ -1877,6 +1941,7 @@ __defs["components/stat"] = function()
 local Control = require("core/control")
 local Create = require("util/create")
 local Validate = require("util/validate")
+local Fit = require("util/fit")
 
 local Stat = setmetatable({}, { __index = Control })
 Stat.__index = Stat
@@ -1891,8 +1956,6 @@ function Stat.new(card, cfg)
 	end
 	local self = Control.base(card, cfg, "Stat", Stat)
 	self.Header.Size = UDim2.new(1, 0, 0, self._ctx.Touch and 30 or 24)
-	self:_addName(0)
-	self._nameLabel.Size = UDim2.new(0.5, -4, 1, 0)
 	self._style_ = style
 
 	local value = Create.new("TextLabel", {
@@ -1908,10 +1971,18 @@ function Stat.new(card, cfg)
 	self:_style(value, "Medium", "Body")
 	self._value = value
 
+	-- The value takes the width it needs (up to 60% of the row); the name gets the rest and wraps if it must.
+	self:_addName(function(width)
+		local needed = value.Text == "" and 0 or Fit.width(value.Text, value.TextSize, value.Font) + 2
+		local valueW = math.min(needed, math.floor(width * 0.6))
+		value.Size = UDim2.new(0, valueW, 1, 0)
+		return valueW > 0 and valueW + 12 or 0
+	end, { watch = { value } })
+
 	self:_onRender(function(t)
 		local c = t.Colors
 		self._nameLabel.TextColor3 = self._disabled and c.TextMuted or c.TextDim
-		value.TextColor3 = self._disabled and c.TextMuted or c[STYLES[style]]
+		value.TextColor3 = self._disabled and c.TextMuted or c[STYLES[self._style_]]
 	end)
 	return self:_finish(cfg)
 end
@@ -1921,7 +1992,18 @@ function Stat:Get()
 end
 
 function Stat:Set(value)
-	self._value.Text = tostring(value)
+	local text = tostring(value)
+	if self._value.Text ~= text then
+		self._value.Text = text
+	end
+end
+
+function Stat:SetStyle(style)
+	if not STYLES[style] then
+		error(("[UI] Stat:SetStyle: Style must be Normal, Accent, Success or Danger (got '%s')"):format(tostring(style)), 0)
+	end
+	self._style_ = style
+	self:_rerender(false)
 end
 
 return Stat
@@ -2038,6 +2120,7 @@ local Create = require("util/create")
 local Maid = require("util/maid")
 local Tween = require("util/tween")
 local Validate = require("util/validate")
+local Fit = require("util/fit")
 local Icons = require("core/icons")
 local Toggle = require("components/toggle")
 local Button = require("components/button")
@@ -2148,6 +2231,16 @@ function Card.new(tab, cfg, column)
 	})
 	theme:Text(title, "Text", "Bold", "Header")
 	self._title = title
+	Fit.bind({
+		label = title,
+		container = header,
+		base = sp.Header,
+		reserve = titleX + 40,
+		maid = self._maid,
+		scale = function()
+			return window:_textScale()
+		end,
+	})
 
 	local chevron = Create.new("TextLabel", {
 		Name = "Chevron",
@@ -2345,6 +2438,7 @@ end
 __defs["core/control"] = function()
 local Create = require("util/create")
 local Maid = require("util/maid")
+local Fit = require("util/fit")
 
 local Control = {}
 Control.__index = Control
@@ -2403,12 +2497,33 @@ function Control:_rerender(animate)
 	end
 end
 
-function Control:_addName(reserve)
+-- Long text wraps onto extra lines and the header grows, instead of being cut off with "...".
+-- `reserve` is the space kept free on the right (number, or function(width) -> number).
+function Control:_fitHeader(label, reserve, opts)
+	opts = opts or {}
+	local window = self._ctx.Window
+	self._fitter = Fit.bind({
+		label = label,
+		container = self.Header,
+		base = self.Header.Size.Y.Offset,
+		reserve = reserve,
+		padX = opts.padX,
+		sizeLabel = opts.sizeLabel,
+		watch = opts.watch,
+		maid = self._maid,
+		scale = function()
+			return window:_textScale()
+		end,
+	})
+	return self._fitter
+end
+
+function Control:_addName(reserve, opts)
+	local fixed = type(reserve) == "number" and reserve or 0
 	local label = Create.new("TextLabel", {
 		Name = "Name",
-		Size = UDim2.new(1, -(reserve or 0), 1, 0),
+		Size = UDim2.new(1, -fixed, 1, 0),
 		Text = self._name,
-		TextTruncate = Enum.TextTruncate.AtEnd,
 		Parent = self.Header,
 	})
 	self._ctx.Theme:Bind(label, {
@@ -2423,6 +2538,8 @@ function Control:_addName(reserve)
 	self:_onRender(function(theme)
 		label.TextColor3 = self._disabled and theme.Colors.TextMuted or theme.Colors.Text
 	end)
+	opts = opts or {}
+	self:_fitHeader(label, reserve or 0, { sizeLabel = true, watch = opts.watch })
 	return label
 end
 
@@ -2765,6 +2882,28 @@ local function actionButton(window, parent, order, glyph, hoverToken, onClick)
 	return button
 end
 
+-- Shared minimized look: window fill, accent gradient border.
+local function styleShell(theme, frame)
+	theme:Bind(frame, {
+		BackgroundColor3 = "Window",
+		BackgroundTransparency = function(t)
+			return t.Transparency.Pill
+		end,
+	})
+	local stroke = Create.new("UIStroke", {
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Thickness = 2,
+		Color = Color3.new(1, 1, 1),
+		Parent = frame,
+	})
+	local gradient = Create.new("UIGradient", { Parent = stroke })
+	theme:Bind(gradient, {
+		Color = function(t)
+			return ColorSequence.new(t.Colors.Accent, t.Colors.AccentAlt)
+		end,
+	})
+end
+
 local function buildPill(self, window, cfg)
 	local theme = window.Theme
 	self.Height = window._ctx.Touch and 48 or 44
@@ -2778,25 +2917,8 @@ local function buildPill(self, window, cfg)
 		ZIndex = 20,
 		Parent = window._root,
 	})
-	theme:Bind(frame, {
-		BackgroundColor3 = "Window",
-		BackgroundTransparency = function(t)
-			return t.Transparency.Pill
-		end,
-	})
+	styleShell(theme, frame)
 	Create.Corner(frame, UDim.new(1, 0))
-	local stroke = Create.new("UIStroke", {
-		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-		Thickness = 2,
-		Color = Color3.new(1, 1, 1),
-		Parent = frame,
-	})
-	local gradient = Create.new("UIGradient", { Parent = stroke })
-	theme:Bind(gradient, {
-		Color = function(t)
-			return ColorSequence.new(t.Colors.Accent, t.Colors.AccentAlt)
-		end,
-	})
 	local list = Create.List(frame, Enum.FillDirection.Horizontal, 0)
 	list.VerticalAlignment = Enum.VerticalAlignment.Center
 
@@ -2838,10 +2960,13 @@ local function buildPill(self, window, cfg)
 		Parent = content,
 	})
 	theme:Text(title, "Text", "Medium", "Body")
+	self.TitleLabel = title
 
 	window._maid:Give(theme:Watch(function(t)
 		Glyphs.paint(moveParts, t.Colors.TextMuted)
-		icon:Paint(t.Colors.Accent)
+		if icon.Kind ~= "image" then
+			icon:Paint(t.Colors.Accent)
+		end
 	end))
 
 	self.Frame = frame
@@ -2852,7 +2977,7 @@ end
 
 local function buildBar(self, window, cfg)
 	local theme = window.Theme
-	self.Height = window._ctx.Touch and 46 or 40
+	self.Height = window._ctx.Touch and 46 or 42
 	self.BarWidth = BAR_WIDTH
 
 	local frame = Create.new("Frame", {
@@ -2863,19 +2988,48 @@ local function buildBar(self, window, cfg)
 		ZIndex = 20,
 		Parent = window._root,
 	})
-	theme:Bind(frame, { BackgroundColor3 = "Control" })
+	styleShell(theme, frame)
 	theme:Corner(frame, "Window")
-	theme:Stroke(frame, "Stroke", 1)
 
-	local title = Create.new("TextLabel", {
-		Name = "Title",
-		Position = UDim2.new(0, 18, 0, 0),
-		Size = UDim2.new(1, -(18 + 116), 1, 0),
-		Text = cfg.Title,
-		TextTruncate = Enum.TextTruncate.AtEnd,
+	local icon = Icons.Make(frame, cfg.FabIcon or cfg.Icon, cfg.Title, 26, { Tint = false, Corner = 6, Theme = theme })
+	icon.Frame.AnchorPoint = Vector2.new(0, 0.5)
+	icon.Frame.Position = UDim2.new(0, 12, 0.5, 0)
+	window._maid:Give(theme:Watch(function(t)
+		if icon.Kind ~= "image" then
+			icon:Paint(t.Colors.Accent)
+		end
+	end))
+
+	local text = Create.new("Frame", {
+		Name = "Text",
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		Position = UDim2.new(0, 48, 0, 0),
+		Size = UDim2.new(1, -(48 + 116), 1, 0),
 		Parent = frame,
 	})
-	theme:Text(title, "Text", "Medium", "Body")
+	local textList = Create.List(text, Enum.FillDirection.Horizontal, 8)
+	textList.VerticalAlignment = Enum.VerticalAlignment.Center
+	local title = Create.new("TextLabel", {
+		Name = "Title",
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		Text = cfg.Title,
+		LayoutOrder = 1,
+		Parent = text,
+	})
+	theme:Text(title, "Text", "Bold", "Body")
+	local subtitle = Create.new("TextLabel", {
+		Name = "Subtitle",
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		Text = cfg.Subtitle or "",
+		Visible = cfg.Subtitle ~= nil and cfg.Subtitle ~= "",
+		LayoutOrder = 2,
+		Parent = text,
+	})
+	theme:Text(subtitle, "TextDim", "Regular", "Small")
+	self.TitleLabel, self.SubtitleLabel = title, subtitle
 
 	local actions = Create.new("Frame", {
 		Name = "Actions",
@@ -3939,6 +4093,7 @@ local Tween = require("util/tween")
 local Drag = require("util/drag")
 local Maid = require("util/maid")
 local Validate = require("util/validate")
+local Keys = require("util/keys")
 
 local KeyList = {}
 KeyList.__index = KeyList
@@ -3951,45 +4106,12 @@ local COLOR_TOKENS = { Accent = true, Success = true, Warning = true, Danger = t
 
 local SHOW_WHEN = { Minimized = true, Hidden = true, Closed = true, Always = true }
 
-local SHORT = {
-	LeftShift = "LShift",
-	RightShift = "RShift",
-	LeftControl = "LCtrl",
-	RightControl = "RCtrl",
-	LeftAlt = "LAlt",
-	RightAlt = "RAlt",
-	Backspace = "Bksp",
-	Return = "Enter",
-	Zero = "0",
-	One = "1",
-	Two = "2",
-	Three = "3",
-	Four = "4",
-	Five = "5",
-	Six = "6",
-	Seven = "7",
-	Eight = "8",
-	Nine = "9",
-}
-
 local function toKey(value)
-	if value == nil then
-		return nil
-	end
-	if typeof(value) == "EnumItem" then
-		return value
-	end
-	if type(value) == "string" and Enum.KeyCode[value] then
-		return Enum.KeyCode[value]
-	end
-	error("[UI] KeybindList: expected an Enum.KeyCode or a key name like \"F\"", 0)
+	return Keys.parse(value, "KeybindList", true)
 end
 
 local function keyText(key)
-	if not key then
-		return "--"
-	end
-	return SHORT[key.Name] or key.Name
+	return Keys.text(key, "--")
 end
 
 local function checkColor(where, color)
@@ -4702,6 +4824,1181 @@ end
 return PushButton
 end
 
+__defs["core/stattracker"] = function()
+-- Stat tracker: a Stats tab inside the window plus a floating, draggable overlay that shows while the
+-- window is minimized (same look as the keybind list). Tracks any number: leaderstats, attributes,
+-- value objects, text labels, a function, or counters the script bumps itself.
+local Create = require("util/create")
+local Tween = require("util/tween")
+local Drag = require("util/drag")
+local Maid = require("util/maid")
+local Validate = require("util/validate")
+local Format = require("util/format")
+local Fit = require("util/fit")
+local Services = require("util/services")
+
+local Players = Services.Players
+
+local Tracker = {}
+Tracker.__index = Tracker
+
+local Stat = {}
+Stat.__index = Stat
+
+local DEFAULT_WIDTH = 230
+local SHOW_WHEN = { Minimized = true, Hidden = true, Closed = true, Always = true }
+local FORMATS = { Compact = true, Number = true, Money = true, Time = true, Clock = true, Percent = true, Text = true }
+local MODES = { Net = true, Earned = true }
+local RATE_AFTER = 15
+
+local function shouldShow(mode, state)
+	if mode == "Always" then
+		return true
+	end
+	if mode == "Minimized" then
+		return state == "minimized"
+	end
+	if mode == "Hidden" then
+		return state == "hidden"
+	end
+	return state ~= "open"
+end
+
+local function styleText(theme, label, font, size)
+	theme:Bind(label, {
+		Font = function(t)
+			return t.Font[font]
+		end,
+		TextSize = function(t)
+			return t.TextSize[size]
+		end,
+	})
+end
+
+local function localPlayer()
+	return Players and Players.LocalPlayer
+end
+
+local function findChild(parent, name)
+	if not parent then
+		return nil
+	end
+	local child = parent:FindFirstChild(name)
+	if child then
+		return child
+	end
+	local wanted = string.lower(name)
+	for _, item in ipairs(parent:GetChildren()) do
+		if string.lower(item.Name) == wanted then
+			return item
+		end
+	end
+	return nil
+end
+
+local function readInstance(inst)
+	if typeof(inst) ~= "Instance" then
+		return nil
+	end
+	if inst:IsA("ValueBase") then
+		return inst.Value
+	end
+	if inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox") then
+		return inst.Text
+	end
+	return nil
+end
+
+-- Builds the function that reads a stat's current value, from whichever source the config names.
+local function makeReader(cfg)
+	if cfg.Get then
+		return cfg.Get
+	end
+	if cfg.Leaderstat then
+		local name = cfg.Leaderstat
+		return function()
+			local player = localPlayer()
+			return readInstance(findChild(player and player:FindFirstChild("leaderstats"), name))
+		end
+	end
+	if cfg.Attribute then
+		local name, target = cfg.Attribute, cfg.Instance
+		return function()
+			local inst = target
+			if type(inst) == "function" then
+				inst = inst()
+			elseif inst == nil then
+				inst = localPlayer()
+			end
+			if typeof(inst) ~= "Instance" then
+				return nil
+			end
+			return inst:GetAttribute(name)
+		end
+	end
+	if cfg.Source then
+		local source = cfg.Source
+		return function()
+			local inst = source
+			if type(inst) == "function" then
+				inst = inst()
+			end
+			return readInstance(inst)
+		end
+	end
+	return nil
+end
+
+-- The style used for gains and rates: time stays time, everything else is shown compact.
+local DELTA_STYLE = { Time = "Time", Clock = "Time", Money = "Money", Percent = "Percent", Number = "Number" }
+
+local function deltaStyle(style)
+	return type(style) == "string" and DELTA_STYLE[style] or "Compact"
+end
+
+-- ----------------------------------------------------------------- stat
+
+function Stat:_read()
+	if not self._reader then
+		return
+	end
+	local ok, raw = pcall(self._reader)
+	if ok and raw ~= nil then
+		self:_push(raw)
+	end
+end
+
+-- Feeds a new reading in. Numbers count toward the session gain while the tracker runs.
+function Stat:_push(raw)
+	self._raw = raw
+	local number = type(raw) ~= "boolean" and Format.parse(raw) or nil
+	if self._format == "Text" or number == nil then
+		self._number = nil
+		return
+	end
+	local last = self._number
+	self._number = number
+	if last == nil or self._tracker._paused then
+		return
+	end
+	local delta = number - last
+	if delta ~= 0 then
+		self._net = self._net + delta
+		if delta > 0 then
+			self._earned = self._earned + delta
+		end
+	end
+end
+
+function Stat:_valueText()
+	if self._number ~= nil and self._format ~= "Text" then
+		return Format.value(self._number, self._format, self._decimals, self._prefix, self._suffix)
+	end
+	if self._raw == nil then
+		return "--"
+	end
+	return (self._prefix or "") .. tostring(self._raw) .. (self._suffix or "")
+end
+
+function Stat:GetGained()
+	return self._mode == "Earned" and self._earned or self._net
+end
+
+-- Average gain per hour over the session (nil until there is enough time to say).
+function Stat:GetRate()
+	local elapsed = self._tracker:GetElapsed()
+	if elapsed < RATE_AFTER then
+		return nil
+	end
+	return self:GetGained() / elapsed * 3600
+end
+
+function Stat:_texts()
+	local style = deltaStyle(self._format)
+	local numeric = self._number ~= nil
+	local out = { value = self:_valueText() }
+	if not numeric then
+		return out
+	end
+	if self._showGain then
+		local gained = self:GetGained()
+		local sign = gained > 0 and "+" or (gained < 0 and "-" or "+")
+		out.gain = sign .. Format.value(math.abs(gained), style, self._decimals)
+		out.gainSign = gained > 0 and 1 or (gained < 0 and -1 or 0)
+	end
+	local rate = self:GetRate()
+	if self._showRate then
+		out.rate = rate and (Format.value(rate, style, self._decimals) .. "/hr") or "--/hr"
+	end
+	if self._goal then
+		local fraction = math.clamp(self._number / self._goal, 0, 1)
+		out.fraction = fraction
+		local eta
+		if self._number >= self._goal then
+			eta = "Goal reached"
+		elseif rate and rate > 0 then
+			eta = "Goal in " .. Format.duration((self._goal - self._number) / rate * 3600)
+		else
+			eta = string.format("%d%% of goal", math.floor(fraction * 100))
+		end
+		out.eta = eta
+	end
+	return out
+end
+
+function Stat:_render()
+	if self._destroyed then
+		return
+	end
+	local texts = self:_texts()
+	local tracker = self._tracker
+
+	if self._control then
+		self._control:Set(texts.value)
+		local parts = {}
+		if texts.gain then
+			parts[#parts + 1] = texts.gain .. " this session"
+		end
+		if texts.rate and self._number ~= nil then
+			parts[#parts + 1] = texts.rate
+		end
+		local desc = table.concat(parts, "  \u{00B7}  ")
+		if desc ~= self._lastDesc then
+			self._lastDesc = desc
+			self._control:SetDescription(desc ~= "" and desc or nil)
+		end
+	end
+	if self._progress and self._goal then
+		self._progress:Set(math.min(self._number or 0, self._goal), texts.eta or "")
+	end
+
+	local hud = self._hud
+	if hud then
+		if hud.value.Text ~= texts.value then
+			hud.value.Text = texts.value
+		end
+		local left = texts.gain or ""
+		local right = texts.eta or texts.rate or ""
+		if hud.gain.Text ~= left then
+			hud.gain.Text = left
+		end
+		if hud.rate.Text ~= right then
+			hud.rate.Text = right
+		end
+		hud.sub.Visible = left ~= "" or right ~= ""
+		hud.bar.Visible = texts.fraction ~= nil
+		if texts.fraction then
+			hud.fill.Size = UDim2.fromScale(texts.fraction, 1)
+		end
+		if hud.sign ~= texts.gainSign then
+			hud.sign = texts.gainSign
+			tracker:_paintRowColors(self)
+		end
+	end
+end
+
+function Stat:Get()
+	return self._number ~= nil and self._number or self._raw
+end
+
+-- For counters and script-driven stats: set the current value.
+function Stat:Set(value)
+	self:_push(value)
+	self:_render()
+end
+
+-- For counters: add to the current value (default 1). Counts toward the session gain.
+function Stat:Increment(amount)
+	self:_push((self._number or 0) + (amount or 1))
+	self:_render()
+end
+
+function Stat:SetGoal(goal)
+	if goal ~= nil and (type(goal) ~= "number" or goal <= 0) then
+		error("[UI] Stat:SetGoal expects a positive number or nil", 0)
+	end
+	self._goal = goal
+	if goal and self._card and not self._progress then
+		self._progress = self._card:CreateProgress({ Name = self._name .. " goal", Min = 0, Max = goal })
+	elseif goal and self._progress then
+		self._progress:SetRange(0, goal)
+	end
+	if self._progress then
+		self._progress:SetVisible(goal ~= nil and self._visible)
+	end
+	self:_render()
+end
+
+function Stat:SetName(text)
+	self._name = tostring(text)
+	if self._control then
+		self._control:SetName(self._name)
+	end
+	if self._hud then
+		self._hud.name.Text = self._name
+	end
+end
+
+-- Start counting the gain again from the current value.
+function Stat:Reset()
+	self._net, self._earned = 0, 0
+	self:_render()
+end
+
+function Stat:SetVisible(visible)
+	self._visible = visible and true or false
+	if self._control then
+		self._control:SetVisible(self._visible)
+	end
+	if self._progress then
+		self._progress:SetVisible(self._visible and self._goal ~= nil)
+	end
+	if self._hud then
+		self._hud.row.Visible = self._visible and self._showInHud
+	end
+	self._tracker:_sync()
+end
+
+-- Show or hide this stat in the floating overlay (it stays in the tab).
+function Stat:SetHud(show)
+	self._showInHud = show and true or false
+	if self._hud then
+		self._hud.row.Visible = self._visible and self._showInHud
+	end
+	self._tracker:_sync()
+end
+
+function Stat:Remove()
+	if self._destroyed then
+		return
+	end
+	self._destroyed = true
+	self._maid:Destroy()
+	if self._control then
+		self._control:Destroy()
+	end
+	if self._progress then
+		self._progress:Destroy()
+	end
+	if self._hud then
+		self._hud.row:Destroy()
+	end
+	self._tracker:_forget(self)
+end
+
+Stat.Destroy = Stat.Remove
+
+-- -------------------------------------------------------------- tracker
+
+function Tracker:_nextOrder()
+	self._order = self._order + 1
+	return self._order
+end
+
+function Tracker:_scaleFn()
+	local window = self._window
+	return function()
+		if self._scale.Scale < 0.999 then
+			return nil
+		end
+		return math.max(window._uiScale, 0.01)
+	end
+end
+
+function Tracker:_buildRow(stat)
+	local window = self._window
+	local theme = window.Theme
+	local touch = window._ctx.Touch
+	local maid = stat._maid
+
+	local row = Create.new("Frame", {
+		Name = "Stat",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = self:_nextOrder(),
+		Visible = stat._showInHud,
+		Parent = self._body,
+	})
+	Create.List(row, Enum.FillDirection.Vertical, 1)
+	Create.Padding(row, 8, 3, 8, 3)
+
+	local line = Create.new("Frame", {
+		Name = "Line",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, touch and 22 or 20),
+		LayoutOrder = 1,
+		Parent = row,
+	})
+	local value = Create.new("TextLabel", {
+		Name = "Value",
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.new(0, 60, 1, 0),
+		Text = "--",
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = line,
+	})
+	styleText(theme, value, "Bold", "Body")
+	local name = Create.new("TextLabel", {
+		Name = "Name",
+		Size = UDim2.new(1, -70, 1, 0),
+		Text = stat._name,
+		Parent = line,
+	})
+	styleText(theme, name, "Medium", "Small")
+	Fit.bind({
+		label = name,
+		container = line,
+		base = touch and 22 or 20,
+		sizeLabel = true,
+		watch = { value },
+		maid = maid,
+		scale = self:_scaleFn(),
+		reserve = function(width)
+			local needed = Fit.width(value.Text, value.TextSize, value.Font) + 2
+			local valueW = math.min(needed, math.floor(width * 0.6))
+			value.Size = UDim2.new(0, valueW, 1, 0)
+			return valueW + 10
+		end,
+	})
+
+	local sub = Create.new("Frame", {
+		Name = "Sub",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 14),
+		LayoutOrder = 2,
+		Visible = false,
+		Parent = row,
+	})
+	local gain = Create.new("TextLabel", {
+		Name = "Gain",
+		Size = UDim2.new(0.5, -4, 1, 0),
+		Text = "",
+		Parent = sub,
+	})
+	styleText(theme, gain, "Medium", "Small")
+	local rate = Create.new("TextLabel", {
+		Name = "Rate",
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.new(0.5, -4, 1, 0),
+		Text = "",
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = sub,
+	})
+	styleText(theme, rate, "Regular", "Small")
+
+	local barWrap = Create.new("Frame", {
+		Name = "Goal",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 7),
+		LayoutOrder = 3,
+		Visible = false,
+		Parent = row,
+	})
+	local bar = Create.new("Frame", {
+		Name = "Track",
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.new(1, 0, 0, 3),
+		Parent = barWrap,
+	})
+	Create.Corner(bar, UDim.new(1, 0))
+	local fill = Create.new("Frame", { Name = "Fill", Size = UDim2.fromScale(0, 1), Parent = bar })
+	Create.Corner(fill, UDim.new(1, 0))
+
+	stat._hud = {
+		row = row,
+		name = name,
+		value = value,
+		sub = sub,
+		gain = gain,
+		rate = rate,
+		bar = barWrap,
+		fill = fill,
+	}
+	maid:Give(row)
+	maid:Give(theme:Watch(function(t)
+		bar.BackgroundColor3 = t.Colors.Control
+		fill.BackgroundColor3 = t.Colors.Accent
+		self:_paintRowColors(stat)
+	end))
+end
+
+function Tracker:_paintRowColors(stat)
+	local hud = stat._hud
+	local c = self._window.Theme:Get().Colors
+	hud.name.TextColor3 = c.TextDim
+	hud.value.TextColor3 = c.Text
+	hud.rate.TextColor3 = c.TextMuted
+	local sign = hud.sign or 0
+	hud.gain.TextColor3 = sign > 0 and c.Success or (sign < 0 and c.Danger or c.TextMuted)
+end
+
+function Tracker:_cardFor(group)
+	if not self._tab then
+		return nil
+	end
+	local card = self._cards[group]
+	if not card then
+		card = self._tab:CreateCard({ Name = group })
+		self._cards[group] = card
+	end
+	return card
+end
+
+-- Adds a tracked stat. Source (pick one): Leaderstat = "Coins" | Attribute = "Level" (+ Instance) |
+-- Source = ValueObject or TextLabel (or a function returning one) | Get = function() return value end.
+-- With no source it is a counter you drive with :Set / :Increment.
+function Tracker:Add(cfg)
+	if self._destroyed then
+		return nil
+	end
+	Validate.check("StatTracker:Add", cfg, {
+		Name = "string!",
+		Id = "string",
+		Group = "string",
+		Leaderstat = "string",
+		Attribute = "string",
+		Instance = "Instance|function",
+		Source = "Instance|function",
+		Get = "function",
+		Value = "number|string",
+		Format = "string|function",
+		Decimals = "number",
+		Prefix = "string",
+		Suffix = "string",
+		Mode = "string",
+		Goal = "number",
+		Gain = "boolean",
+		Rate = "boolean",
+		Hud = "boolean",
+		Tab = "boolean",
+	})
+	local format = cfg.Format or "Compact"
+	if type(format) == "string" and not FORMATS[format] then
+		error(("[UI] StatTracker:Add: Format must be Compact, Number, Money, Time, Clock, Percent, Text or a function (got '%s')"):format(format), 0)
+	end
+	local mode = cfg.Mode or "Net"
+	if not MODES[mode] then
+		error("[UI] StatTracker:Add: Mode must be Net or Earned", 0)
+	end
+	local id = cfg.Id or cfg.Name
+	if self._byId[id] then
+		error(("[UI] StatTracker:Add: a stat with Id '%s' already exists"):format(id), 0)
+	end
+
+	local stat = setmetatable({}, Stat)
+	stat._tracker = self
+	stat._maid = Maid.new()
+	stat.Id = id
+	stat._name = cfg.Name
+	stat._reader = makeReader(cfg)
+	stat._format = format
+	stat._decimals = cfg.Decimals
+	stat._prefix, stat._suffix = cfg.Prefix, cfg.Suffix
+	stat._mode = mode
+	stat._goal = cfg.Goal
+	stat._showGain = cfg.Gain ~= false and format ~= "Text"
+	stat._showRate = cfg.Rate ~= false and format ~= "Text"
+	stat._showInHud = cfg.Hud ~= false
+	stat._visible = true
+	stat._net, stat._earned = 0, 0
+
+	if cfg.Tab ~= false then
+		local card = self:_cardFor(cfg.Group or "Tracked")
+		if card then
+			stat._card = card
+			stat._control = card:CreateStat({ Name = cfg.Name, Value = "--" })
+			if stat._goal then
+				stat._progress = card:CreateProgress({ Name = cfg.Name .. " goal", Min = 0, Max = stat._goal })
+			end
+		end
+	end
+	self:_buildRow(stat)
+
+	self._stats[#self._stats + 1] = stat
+	self._byId[id] = stat
+	if cfg.Value ~= nil then
+		stat:_push(cfg.Value)
+	end
+	stat:_read()
+	stat:_render()
+	self:_sync()
+	return stat
+end
+
+-- Shortcuts for common sources.
+function Tracker:AddLeaderstat(name, cfg)
+	cfg = cfg or {}
+	cfg.Name = cfg.Name or name
+	cfg.Leaderstat = name
+	return self:Add(cfg)
+end
+
+function Tracker:AddAttribute(name, cfg)
+	cfg = cfg or {}
+	cfg.Name = cfg.Name or name
+	cfg.Attribute = name
+	return self:Add(cfg)
+end
+
+function Tracker:AddCounter(name, cfg)
+	cfg = cfg or {}
+	cfg.Name = cfg.Name or name
+	cfg.Value = cfg.Value or 0
+	cfg.Format = cfg.Format or "Number"
+	return self:Add(cfg)
+end
+
+-- Tracks every value in the player's leaderstats, including ones the game adds later.
+-- opts: Group, Exclude = { "Name", ... }, Format, Hud
+function Tracker:AddLeaderstats(opts)
+	opts = opts or {}
+	local exclude = {}
+	for _, name in ipairs(opts.Exclude or {}) do
+		exclude[string.lower(name)] = true
+	end
+	local function addValue(child)
+		if self._destroyed or not child:IsA("ValueBase") or exclude[string.lower(child.Name)] then
+			return
+		end
+		if self._byId["leaderstat:" .. child.Name] then
+			return
+		end
+		local isText = child:IsA("StringValue") and Format.parse(child.Value) == nil
+		self:Add({
+			Name = child.Name,
+			Id = "leaderstat:" .. child.Name,
+			Group = opts.Group or "Leaderstats",
+			Leaderstat = child.Name,
+			Format = isText and "Text" or opts.Format,
+			Hud = opts.Hud,
+		})
+	end
+	local function watch(folder)
+		for _, child in ipairs(folder:GetChildren()) do
+			addValue(child)
+		end
+		self._maid:Give(folder.ChildAdded:Connect(addValue))
+	end
+	local player = localPlayer()
+	if not player then
+		return
+	end
+	local folder = player:FindFirstChild("leaderstats")
+	if folder then
+		watch(folder)
+	else
+		local conn
+		conn = player.ChildAdded:Connect(function(child)
+			if child.Name == "leaderstats" then
+				conn:Disconnect()
+				watch(child)
+			end
+		end)
+		self._maid:Give(conn)
+	end
+end
+
+function Tracker:Get(id)
+	return self._byId[id]
+end
+
+function Tracker:GetStats()
+	return table.clone(self._stats)
+end
+
+function Tracker:_forget(stat)
+	for i, item in ipairs(self._stats) do
+		if item == stat then
+			table.remove(self._stats, i)
+			break
+		end
+	end
+	if self._byId[stat.Id] == stat then
+		self._byId[stat.Id] = nil
+	end
+	self:_sync()
+end
+
+function Tracker:GetElapsed()
+	return self._elapsed
+end
+
+function Tracker:IsPaused()
+	return self._paused
+end
+
+function Tracker:Pause()
+	if self._paused then
+		return
+	end
+	self._paused = true
+	self:_refreshSession()
+end
+
+function Tracker:Resume()
+	if not self._paused then
+		return
+	end
+	self._paused = false
+	self._lastTick = os.clock()
+	self:_refreshSession()
+end
+
+-- Zero the session clock and every stat's gain.
+function Tracker:Reset()
+	self._elapsed = 0
+	self._lastTick = os.clock()
+	for _, stat in ipairs(self._stats) do
+		stat._net, stat._earned = 0, 0
+		stat:_render()
+	end
+	self:_refreshSession()
+end
+
+-- A short line such as "Farming room 3". Shown under the overlay title and in the Session card.
+-- style: Text (default), Accent, Success, Danger, Warning. Pass nil to clear.
+function Tracker:SetStatus(text, style)
+	self._status = text ~= nil and tostring(text) or nil
+	self._statusStyle = style or "Text"
+	if self._statusControl then
+		self._statusControl:SetVisible(self._status ~= nil)
+		self._statusControl:Set(self._status or "")
+		if style == "Accent" or style == "Success" or style == "Danger" or style == "Normal" then
+			self._statusControl:SetStyle(style)
+		else
+			self._statusControl:SetStyle("Normal")
+		end
+	end
+	self:_refreshSession()
+end
+
+function Tracker:SetTitle(text)
+	self._title.Text = string.upper(tostring(text))
+end
+
+function Tracker:SetShowWhen(mode)
+	if not SHOW_WHEN[mode] then
+		error("[UI] StatTracker: ShowWhen must be Minimized, Hidden, Closed or Always", 0)
+	end
+	self._showWhen = mode
+	self:_sync()
+end
+
+function Tracker:GetShowWhen()
+	return self._showWhen
+end
+
+-- Turn the floating overlay on or off (the Stats tab is not affected).
+function Tracker:SetVisible(visible)
+	self._forceHidden = not visible
+	self:_sync()
+end
+
+function Tracker:SetCollapsed(collapsed)
+	self._collapsed = collapsed and true or false
+	self._body.Visible = not self._collapsed
+	self._divider.Visible = not self._collapsed
+	Tween.play(self._chevron, { Rotation = self._collapsed and 0 or 90 }, self._window.Theme:Get().Animation.Fast)
+end
+
+function Tracker:IsCollapsed()
+	return self._collapsed
+end
+
+function Tracker:GetPosition()
+	return self.Pos
+end
+
+function Tracker:SetPosition(pos)
+	if typeof(pos) ~= "Vector2" then
+		error("[UI] StatTracker:SetPosition expects a Vector2", 0)
+	end
+	self.Pos = pos
+	self:_place()
+end
+
+function Tracker:_refreshSession()
+	local clock = Format.clock(self._elapsed)
+	local header = self._paused and ("Paused  " .. clock) or clock
+	if self._time.Text ~= header then
+		self._time.Text = header
+	end
+	if self._timeControl then
+		self._timeControl:Set(Format.duration(self._elapsed) .. (self._paused and " (paused)" or ""))
+	end
+	if self._pauseButton then
+		self._pauseButton:SetName(self._paused and "Resume Tracking" or "Pause Tracking")
+	end
+	local status = self._status
+	self._statusLabel.Visible = status ~= nil
+	if status and self._statusLabel.Text ~= status then
+		self._statusLabel.Text = status
+	end
+	local c = self._window.Theme:Get().Colors
+	local style = self._statusStyle
+	self._statusLabel.TextColor3 = (style and style ~= "Text" and style ~= "Normal" and c[style]) or c.Text
+end
+
+function Tracker:_tick()
+	local now = os.clock()
+	if not self._paused then
+		self._elapsed = self._elapsed + (now - self._lastTick)
+	end
+	self._lastTick = now
+	for _, stat in ipairs(self._stats) do
+		stat:_read()
+		stat:_render()
+	end
+	self:_refreshSession()
+end
+
+function Tracker:_place()
+	if self._destroyed then
+		return
+	end
+	local window = self._window
+	local vp = window:_viewport()
+	local frame = self.Frame
+	local size = frame.AbsoluteSize / (math.max(window._uiScale, 0.01) * math.max(self._scale.Scale, 0.1))
+	if size.X < 8 then
+		size = Vector2.new(self._width, 80)
+	end
+	local pos = self.Pos or Vector2.new(vp.X - self._width - 12, vp.Y * 0.22)
+	pos = Vector2.new(
+		math.clamp(pos.X, 0, math.max(0, vp.X - size.X)),
+		math.clamp(pos.Y, 0, math.max(0, vp.Y - size.Y))
+	)
+	self.Pos = pos
+	frame.Position = UDim2.fromOffset(math.floor(pos.X), math.floor(pos.Y))
+end
+
+function Tracker:_hasHudStats()
+	for _, stat in ipairs(self._stats) do
+		if stat._showInHud and stat._visible then
+			return true
+		end
+	end
+	return false
+end
+
+-- Show or hide the overlay to match the window state (called by Window:_transition).
+function Tracker:_sync()
+	if self._destroyed then
+		return
+	end
+	local want = self:_hasHudStats() and not self._forceHidden and shouldShow(self._showWhen, self._window._state)
+	if want == self._shown then
+		return
+	end
+	self._shown = want
+	self._token = self._token + 1
+	local token = self._token
+	local anim = self._window.Theme:Get().Animation
+	if want then
+		self.Frame.Visible = true
+		self:_place()
+		Tween.play(self._scale, { Scale = 1 }, anim.Normal, Enum.EasingStyle.Back)
+	else
+		local tween = Tween.play(self._scale, { Scale = 0 }, anim.Fast)
+		tween.Completed:Connect(function()
+			if self._token == token then
+				self.Frame.Visible = false
+			end
+		end)
+	end
+end
+
+function Tracker:IsShown()
+	return self._shown
+end
+
+function Tracker:Destroy()
+	if self._destroyed then
+		return
+	end
+	self._destroyed = true
+	for index = #self._stats, 1, -1 do
+		local stat = self._stats[index]
+		stat._destroyed = true
+		stat._maid:Destroy()
+	end
+	self._stats, self._byId = {}, {}
+	self._maid:Destroy()
+	self.Frame:Destroy()
+	self._window:_removeTracker(self)
+end
+
+-- The Session card at the top of the tab: clock, status, overlay options, pause and reset.
+function Tracker:_buildSessionCard()
+	local card = self._tab:CreateCard({ Name = "Session", Highlight = true })
+	self._sessionCard = card
+	self._timeControl = card:CreateStat({ Name = "Time", Value = "0s" })
+	self._statusControl = card:CreateStat({ Name = "Status", Value = "" })
+	self._statusControl:SetVisible(false)
+	self.Controls = {}
+	self.Controls.Overlay = card:CreateToggle({
+		Name = "Show Overlay",
+		Default = true,
+		Description = "A movable stats panel that stays on screen while the menu is closed.",
+		Callback = function(on)
+			self:SetVisible(on)
+		end,
+	})
+	self.Controls.ShowWhen = card:CreateChips({
+		Name = "Overlay Shows",
+		Options = { "Minimized", "Closed", "Always" },
+		Default = self._showWhen == "Hidden" and "Closed" or self._showWhen,
+		Callback = function(choice)
+			if choice then
+				self:SetShowWhen(choice)
+			end
+		end,
+	})
+	self._pauseButton = card:CreateButton({
+		Name = "Pause Tracking",
+		Callback = function()
+			if self._paused then
+				self:Resume()
+			else
+				self:Pause()
+			end
+		end,
+	})
+	self.Controls.Pause = self._pauseButton
+	self.Controls.Reset = card:CreateButton({
+		Name = "Reset Session",
+		Confirm = { Title = "Reset session?", Content = "The clock and every gain go back to zero." },
+		Callback = function()
+			self:Reset()
+		end,
+	})
+end
+
+function Tracker.new(window, cfg)
+	Validate.check("CreateStatTracker", cfg, {
+		Title = "string",
+		Tab = "string|table|boolean",
+		TabGroup = "string",
+		ShowWhen = "string",
+		Interval = "number",
+		Width = "number",
+		Position = "Vector2",
+		Draggable = "boolean",
+		SessionCard = "boolean",
+	})
+	local showWhen = cfg.ShowWhen or "Minimized"
+	if not SHOW_WHEN[showWhen] then
+		error("[UI] CreateStatTracker: ShowWhen must be Minimized, Hidden, Closed or Always", 0)
+	end
+
+	local theme = window.Theme
+	local touch = window._ctx.Touch
+	local self = setmetatable({}, Tracker)
+	self._window = window
+	self._maid = Maid.new()
+	self._stats, self._byId, self._cards = {}, {}, {}
+	self._order = 0
+	self._token = 0
+	self._shown = false
+	self._showWhen = showWhen
+	self._collapsed = false
+	self._paused = false
+	self._elapsed = 0
+	self._lastTick = os.clock()
+	self._interval = math.max(cfg.Interval or 0.5, 0.1)
+	self._width = math.max(170, cfg.Width or DEFAULT_WIDTH)
+	self.Pos = cfg.Position
+	self.Controls = {}
+	window._maid:Give(function()
+		self:Destroy()
+	end)
+
+	local frame = Create.new("Frame", {
+		Name = "StatTracker",
+		Size = UDim2.fromOffset(self._width, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Active = true,
+		Visible = false,
+		ZIndex = 19,
+		Parent = window._root,
+	})
+	theme:Bind(frame, {
+		BackgroundColor3 = "Window",
+		BackgroundTransparency = function(t)
+			return t.Transparency.Pill
+		end,
+	})
+	theme:Corner(frame, "Window")
+	local stroke = Create.new("UIStroke", {
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Thickness = 2,
+		Color = Color3.new(1, 1, 1),
+		Parent = frame,
+	})
+	local gradient = Create.new("UIGradient", { Parent = stroke })
+	theme:Bind(gradient, {
+		Color = function(t)
+			return ColorSequence.new(t.Colors.Accent, t.Colors.AccentAlt)
+		end,
+	})
+	Create.List(frame, Enum.FillDirection.Vertical, 0)
+	Create.Padding(frame, 8, 6, 8, 8)
+	self.Frame = frame
+	self._scale = Create.new("UIScale", { Scale = 0, Parent = frame })
+
+	local header = Create.new("TextButton", {
+		Name = "Header",
+		Size = UDim2.new(1, 0, 0, touch and 32 or 28),
+		LayoutOrder = 1,
+		Parent = frame,
+	})
+	local chevron = Create.new("TextLabel", {
+		Name = "Chevron",
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 4, 0.5, 0),
+		Size = UDim2.fromOffset(12, 12),
+		Text = "\u{203A}",
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Rotation = 90,
+		Parent = header,
+	})
+	theme:Text(chevron, "TextMuted", "Bold", "Body")
+	local title = Create.new("TextLabel", {
+		Name = "Title",
+		Position = UDim2.new(0, 20, 0, 0),
+		Size = UDim2.new(1, -96, 1, 0),
+		Text = string.upper(cfg.Title or "Stats"),
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = header,
+	})
+	theme:Text(title, "TextDim", "Bold", "Small")
+	local time = Create.new("TextLabel", {
+		Name = "Time",
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -8, 0, 0),
+		Size = UDim2.new(0, 80, 1, 0),
+		Text = "0:00",
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = header,
+	})
+	theme:Text(time, "TextMuted", "Medium", "Small")
+	self._title, self._time, self._chevron = title, time, chevron
+
+	local statusLabel = Create.new("TextLabel", {
+		Name = "Status",
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		TextWrapped = true,
+		Text = "",
+		Visible = false,
+		LayoutOrder = 2,
+		Parent = frame,
+	})
+	Create.Padding(statusLabel, 8, 0, 8, 6)
+	styleText(theme, statusLabel, "Medium", "Small")
+	self._statusLabel = statusLabel
+
+	local divider = Create.new("Frame", {
+		Name = "Divider",
+		Size = UDim2.new(1, 0, 0, 1),
+		LayoutOrder = 3,
+		Parent = frame,
+	})
+	theme:Bind(divider, { BackgroundColor3 = "Divider" })
+	self._divider = divider
+
+	local body = Create.new("Frame", {
+		Name = "Body",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = 4,
+		Parent = frame,
+	})
+	Create.List(body, Enum.FillDirection.Vertical, 2)
+	Create.Padding(body, 0, 6, 0, 0)
+	self._body = body
+
+	-- tap the header to collapse; drag anywhere on the panel to move it
+	local start
+	local draggable = cfg.Draggable ~= false
+	local function bindDrag(handle, onTap)
+		Drag.bind(handle, {
+			Threshold = 6,
+			OnStart = function()
+				start = self.Pos
+			end,
+			OnDelta = function(delta)
+				if draggable and start then
+					self.Pos = start + delta / window._uiScale
+					self:_place()
+				end
+			end,
+			OnEnd = function(moved)
+				if not moved and onTap then
+					onTap()
+				end
+			end,
+		}, self._maid)
+	end
+	bindDrag(header, function()
+		self:SetCollapsed(not self._collapsed)
+	end)
+	bindDrag(frame)
+
+	self._maid:Give(frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		if frame.Visible then
+			self:_place()
+		end
+	end))
+	self._maid:Give(theme:Watch(function()
+		for _, stat in ipairs(self._stats) do
+			if stat._hud then
+				self:_paintRowColors(stat)
+			end
+		end
+		self:_refreshSession()
+	end))
+
+	local tabSpec = cfg.Tab
+	if tabSpec == nil then
+		tabSpec = "Stats"
+	end
+	if type(tabSpec) == "string" then
+		self._tab = window:CreateTab({ Name = tabSpec, Group = cfg.TabGroup })
+	elseif type(tabSpec) == "table" then
+		self._tab = tabSpec
+	end
+	if self._tab and cfg.SessionCard ~= false then
+		self:_buildSessionCard()
+	end
+
+	task.spawn(function()
+		while not self._destroyed do
+			task.wait(self._interval)
+			if self._destroyed then
+				break
+			end
+			local ok, err = pcall(self._tick, self)
+			if not ok and not self._warned then
+				self._warned = true
+				warn("[UI] stat tracker update failed: " .. tostring(err))
+			end
+		end
+	end)
+
+	self:_refreshSession()
+	return self
+end
+
+return Tracker
+end
+
 __defs["core/tab"] = function()
 local Create = require("util/create")
 local Maid = require("util/maid")
@@ -5225,6 +6522,8 @@ local Icons = require("core/icons")
 local Tab = require("core/tab")
 local Dock = require("core/dock")
 local KeyList = require("core/keylist")
+local StatTracker = require("core/stattracker")
+local Keys = require("util/keys")
 local Mount = require("util/mount")
 local Effects = require("core/effects")
 local Toast = require("core/toast")
@@ -5293,7 +6592,7 @@ local function build(cfg, partial)
 		Subtitle = "string",
 		Icon = "string|number",
 		Theme = "string|table",
-		ToggleKey = "EnumItem",
+		ToggleKey = "EnumItem|string",
 		Size = "Vector2",
 		Footer = "string|table",
 		OnClose = "function",
@@ -5316,6 +6615,7 @@ local function build(cfg, partial)
 	self._maid = Maid.new()
 	partial.self = self
 	self._tabs = {}
+	self._trackers = {}
 	self._groups = {}
 	self._groupOrder = 0
 	self._destroyCallbacks = {}
@@ -5325,7 +6625,7 @@ local function build(cfg, partial)
 	self._userRail = false
 	self._userScale = cfg.Scale
 	self._uiScale = 1
-	self._toggleKey = cfg.ToggleKey
+	self._toggleKey = Keys.parse(cfg.ToggleKey, "CreateWindow", true)
 	self._size = cfg.Size or Vector2.new(640, 420)
 	self._tabIcons = cfg.TabIcons ~= false
 
@@ -5584,7 +6884,7 @@ local function build(cfg, partial)
 			local keyLabel = Create.new("TextLabel", {
 				Size = UDim2.fromOffset(0, 22),
 				AutomaticSize = Enum.AutomaticSize.X,
-				Text = cfg.ToggleKey.Name,
+				Text = Keys.text(self._toggleKey),
 				TextXAlignment = Enum.TextXAlignment.Center,
 				Parent = badge,
 			})
@@ -5824,18 +7124,31 @@ local function build(cfg, partial)
 	self._maid:Give(hamburger.Activated:Connect(function()
 		self:SetSidebarCollapsed(not self._userRail)
 	end))
+	-- filter after a short pause in typing, not on every keystroke
+	local searchToken = 0
 	self._maid:Give(searchBox:GetPropertyChangedSignal("Text"):Connect(function()
-		self:_filter(searchBox.Text)
+		searchToken = searchToken + 1
+		local token = searchToken
+		local text = searchBox.Text
+		if text == "" then
+			self:_filter("")
+			return
+		end
+		task.delay(0.12, function()
+			if token == searchToken and not self._destroyed then
+				self:_filter(text)
+			end
+		end)
 	end))
 	self._maid:Give(gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 		self:_closePopup()
 		self:_queueLayout()
 	end))
 	self._maid:Give(UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or not self._toggleKey then
+		if processed or not self._toggleKey or Keys.blocked(input) then
 			return
 		end
-		if input.KeyCode == self._toggleKey then
+		if Keys.matches(input, self._toggleKey) then
 			self:Toggle()
 		end
 	end))
@@ -5891,6 +7204,16 @@ function Window:_updateScale()
 	self._uiScale = scale
 	self._rootScale.Scale = scale
 	self._root.Size = UDim2.fromOffset(abs.X / scale, abs.Y / scale)
+end
+
+-- Factor between unscaled layout pixels and absolute pixels, or nil while the open/close animation runs
+-- (text is re-fitted once the animation settles, instead of every frame).
+function Window:_textScale()
+	local anim = self._scale.Scale
+	if anim < 0.999 then
+		return nil
+	end
+	return math.max(self._uiScale * anim, 0.01)
 end
 
 function Window:_viewport()
@@ -6038,6 +7361,11 @@ function Window:_placeFab()
 	if self._keylist and self._keylist.Frame.Visible then
 		self._keylist:_place()
 	end
+	for _, tracker in ipairs(self._trackers) do
+		if tracker.Frame.Visible then
+			tracker:_place()
+		end
+	end
 end
 
 function Window:_transition(state)
@@ -6045,6 +7373,9 @@ function Window:_transition(state)
 	self._state = state
 	if self._keylist then
 		self._keylist:_sync()
+	end
+	for _, tracker in ipairs(self._trackers) do
+		tracker:_sync()
 	end
 	self._token = self._token + 1
 	local token = self._token
@@ -6123,9 +7454,10 @@ function Window:Show()
 end
 
 function Window:SetToggleKey(keyCode)
+	keyCode = Keys.parse(keyCode, "SetToggleKey", true)
 	self._toggleKey = keyCode
 	if self._keyBadge then
-		self._keyBadge.Text = keyCode and keyCode.Name or "None"
+		self._keyBadge.Text = Keys.text(keyCode)
 	end
 end
 
@@ -6329,6 +7661,30 @@ function Window:GetKeybindList()
 	return self._keylist
 end
 
+-- A Stats tab plus a floating overlay that shows while the window is minimized. See core/stattracker.lua.
+function Window:CreateStatTracker(cfg)
+	if self._destroyed then
+		return nil
+	end
+	local tracker = StatTracker.new(self, cfg or {})
+	self._trackers[#self._trackers + 1] = tracker
+	tracker:_sync()
+	return tracker
+end
+
+function Window:GetStatTracker(index)
+	return self._trackers[index or 1]
+end
+
+function Window:_removeTracker(tracker)
+	for i, item in ipairs(self._trackers) do
+		if item == tracker then
+			table.remove(self._trackers, i)
+			break
+		end
+	end
+end
+
 function Window:Confirm(cfg)
 	if self._destroyed then
 		return nil
@@ -6337,11 +7693,23 @@ function Window:Confirm(cfg)
 end
 
 function Window:SetTitle(text)
-	self._brandTitle.Text = tostring(text)
+	text = tostring(text)
+	self._brandTitle.Text = text
+	self._cfg.Title = text
+	if self._dock and self._dock.TitleLabel then
+		self._dock.TitleLabel.Text = text
+	end
 end
 
 function Window:SetSubtitle(text)
-	self._brandSubtitle.Text = tostring(text)
+	text = tostring(text)
+	self._brandSubtitle.Text = text
+	self._cfg.Subtitle = text
+	local label = self._dock and self._dock.SubtitleLabel
+	if label then
+		label.Text = text
+		label.Visible = text ~= ""
+	end
 end
 
 function Window:SetColor(token, color)
@@ -6900,6 +8268,291 @@ return function()
 end
 end
 
+__defs["util/fit"] = function()
+-- Text measuring and wrapping. Instead of cutting text off with "...",
+-- labels wrap onto extra lines and their row grows to fit them.
+local TextService = require("util/services").TextService
+
+local Fit = {}
+
+local HUGE = 100000
+local cache = {}
+local cacheSize = 0
+
+local function measure(text, size, font, width)
+	local key = text .. "\0" .. tostring(size) .. "\0" .. tostring(font) .. "\0" .. tostring(width)
+	local hit = cache[key]
+	if hit then
+		return hit
+	end
+	if not TextService then
+		return nil
+	end
+	local ok, result = pcall(TextService.GetTextSize, TextService, text, size, font, Vector2.new(width, HUGE))
+	if not ok then
+		return nil
+	end
+	if cacheSize >= 512 then
+		cache, cacheSize = {}, 0
+	end
+	cache[key] = result
+	cacheSize = cacheSize + 1
+	return result
+end
+
+-- Width of `text` on one line, in unscaled pixels.
+function Fit.width(text, size, font)
+	local bounds = measure(text, size, font, HUGE)
+	return bounds and math.ceil(bounds.X) or #text * size * 0.55
+end
+
+-- Height of `text` when wrapped to `width` unscaled pixels.
+function Fit.height(text, size, font, width)
+	local bounds = measure(text, size, font, math.max(math.floor(width), 1))
+	return bounds and math.ceil(bounds.Y) or size
+end
+
+-- Keeps `container` tall enough for `label` to wrap its text onto several lines.
+-- A single line keeps the container at `base` height; every extra line adds its height on top.
+-- opts:
+--   label, container, base, maid
+--   scale()      returns the current unscaled-to-absolute factor, or nil while the window animates
+--   reserve      pixels kept free next to the label (number, or function(width) -> number)
+--   padX         horizontal padding inside the label
+--   sizeLabel    set the label width to the container width minus `reserve`
+--   watch        extra TextLabels whose text affects `reserve`
+function Fit.bind(opts)
+	local label, container = opts.label, opts.container
+	label.TextWrapped = true
+	label.TextTruncate = Enum.TextTruncate.None
+
+	local lastKey
+	local queued = false
+
+	local function refit()
+		queued = false
+		if not label.Parent or not container.Parent then
+			return
+		end
+		local scale = opts.scale()
+		if not scale then
+			return
+		end
+		local width = math.floor(container.AbsoluteSize.X / scale + 0.5)
+		if width <= 0 then
+			return
+		end
+		local reserve = opts.reserve or 0
+		if type(reserve) == "function" then
+			reserve = reserve(width)
+		end
+		local avail = math.max(width - reserve - (opts.padX or 0), 1)
+		local text, size, font = label.Text, label.TextSize, label.Font
+		local key = table.concat({ text, tostring(size), tostring(font), tostring(avail), tostring(reserve) }, "\0")
+		if key == lastKey then
+			return
+		end
+		lastKey = key
+		if opts.sizeLabel then
+			label.Size = UDim2.new(1, -reserve, label.Size.Y.Scale, label.Size.Y.Offset)
+		end
+		local line = Fit.height("Ag", size, font, HUGE)
+		local height = Fit.height(text ~= "" and text or "Ag", size, font, avail)
+		local extra = math.max(height - line, 0)
+		local current = container.Size
+		local target = opts.base + extra
+		if current.Y.Offset ~= target or current.Y.Scale ~= 0 then
+			container.Size = UDim2.new(current.X.Scale, current.X.Offset, 0, target)
+		end
+	end
+
+	local function queue()
+		if queued then
+			return
+		end
+		queued = true
+		task.defer(refit)
+	end
+
+	local maid = opts.maid
+	maid:Give(container:GetPropertyChangedSignal("AbsoluteSize"):Connect(queue))
+	for _, prop in ipairs({ "Text", "TextSize", "Font" }) do
+		maid:Give(label:GetPropertyChangedSignal(prop):Connect(queue))
+	end
+	for _, other in ipairs(opts.watch or {}) do
+		maid:Give(other:GetPropertyChangedSignal("Text"):Connect(queue))
+		maid:Give(other:GetPropertyChangedSignal("TextSize"):Connect(queue))
+	end
+	queue()
+
+	return {
+		Refit = function()
+			lastKey = nil
+			queue()
+		end,
+	}
+end
+
+return Fit
+end
+
+__defs["util/format"] = function()
+-- Number formatting and parsing for live stats.
+local Format = {}
+
+local SUFFIXES = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc" }
+local PARSE = {
+	k = 1e3, m = 1e6, b = 1e9, t = 1e12, qa = 1e15, qi = 1e18,
+	sx = 1e21, sp = 1e24, oc = 1e27, no = 1e30, dc = 1e33,
+}
+
+local function trim(text)
+	text = string.gsub(text, "%.?0+$", "")
+	return text
+end
+
+local function fixed(n, decimals)
+	if decimals <= 0 then
+		return string.format("%d", n >= 0 and math.floor(n + 0.5) or -math.floor(-n + 0.5))
+	end
+	return trim(string.format("%." .. decimals .. "f", n))
+end
+
+-- 1234 -> "1.23K", 15300000 -> "15.3M"; three significant digits.
+function Format.compact(n)
+	if n ~= n then
+		return "0"
+	end
+	if n == math.huge or n == -math.huge then
+		return n > 0 and "inf" or "-inf"
+	end
+	local sign = n < 0 and "-" or ""
+	n = math.abs(n)
+	if n < 1000 then
+		if n == math.floor(n) then
+			return sign .. string.format("%d", n)
+		end
+		return sign .. fixed(n, n < 10 and 2 or 1)
+	end
+	local tier = math.floor(math.log10(n) / 3)
+	if tier >= #SUFFIXES then
+		return sign .. trim(string.format("%.2e", n))
+	end
+	local scaled = n / 10 ^ (tier * 3)
+	if scaled >= 999.5 and tier + 1 < #SUFFIXES then
+		tier = tier + 1
+		scaled = scaled / 1000
+	end
+	local decimals = scaled < 10 and 2 or (scaled < 100 and 1 or 0)
+	return sign .. fixed(scaled, decimals) .. SUFFIXES[tier + 1]
+end
+
+-- 1234567 -> "1,234,567"
+function Format.commas(n, decimals)
+	local text = fixed(n, decimals or 0)
+	local sign, int, frac = string.match(text, "^(-?)(%d+)(.*)$")
+	if not int then
+		return text
+	end
+	int = string.reverse((string.gsub(string.reverse(int), "(%d%d%d)", "%1,")))
+	int = string.gsub(int, "^,", "")
+	return sign .. int .. frac
+end
+
+-- 3725 -> "1h 02m", 125 -> "2m 05s", 9 -> "9s"
+function Format.duration(seconds)
+	seconds = math.max(math.floor(seconds or 0), 0)
+	local d = math.floor(seconds / 86400)
+	local h = math.floor(seconds % 86400 / 3600)
+	local m = math.floor(seconds % 3600 / 60)
+	local s = seconds % 60
+	if d > 0 then
+		return string.format("%dd %02dh", d, h)
+	end
+	if h > 0 then
+		return string.format("%dh %02dm", h, m)
+	end
+	if m > 0 then
+		return string.format("%dm %02ds", m, s)
+	end
+	return string.format("%ds", s)
+end
+
+-- 3725 -> "1:02:05"
+function Format.clock(seconds)
+	seconds = math.max(math.floor(seconds or 0), 0)
+	local h = math.floor(seconds / 3600)
+	local m = math.floor(seconds % 3600 / 60)
+	local s = seconds % 60
+	if h > 0 then
+		return string.format("%d:%02d:%02d", h, m, s)
+	end
+	return string.format("%d:%02d", m, s)
+end
+
+-- Reads numbers the way games display them: 1234, "1,234", "$1.5M", "12.3K Coins", "2.1e6".
+-- Returns nil when there is no number in the text.
+function Format.parse(value)
+	if type(value) == "number" then
+		return value
+	end
+	if type(value) == "boolean" then
+		return value and 1 or 0
+	end
+	if type(value) ~= "string" then
+		return nil
+	end
+	local text = string.gsub(value, ",", "")
+	local number, rest = string.match(text, "(%-?%d+%.?%d*[eE][%+%-]?%d+)(.*)")
+	if number then
+		return tonumber(number)
+	end
+	number, rest = string.match(text, "(%-?%d*%.?%d+)%s*(%a*)")
+	if not number then
+		return nil
+	end
+	local n = tonumber(number)
+	if not n then
+		return nil
+	end
+	local suffix = string.lower(rest or "")
+	local mult = PARSE[string.sub(suffix, 1, 2)] or PARSE[string.sub(suffix, 1, 1)]
+	if mult and (#suffix <= 2 or PARSE[string.sub(suffix, 1, 2)]) then
+		n = n * mult
+	end
+	return n
+end
+
+-- Formats a value for a stat. `style` is Compact (default), Number, Money, Time, Clock, Percent, Text,
+-- or a function(value) -> string. Prefix and suffix wrap the result.
+function Format.value(value, style, decimals, prefix, suffix)
+	local text
+	if type(style) == "function" then
+		local ok, result = pcall(style, value)
+		text = ok and tostring(result) or tostring(value)
+	elseif type(value) ~= "number" then
+		text = value == nil and "--" or tostring(value)
+	elseif style == "Number" then
+		text = Format.commas(value, decimals or 0)
+	elseif style == "Money" then
+		text = (value < 0 and "-$" or "$") .. Format.compact(math.abs(value))
+	elseif style == "Time" then
+		text = Format.duration(value)
+	elseif style == "Clock" then
+		text = Format.clock(value)
+	elseif style == "Percent" then
+		text = fixed(value, decimals or 1) .. "%"
+	elseif style == "Text" then
+		text = tostring(value)
+	else
+		text = Format.compact(value)
+	end
+	return (prefix or "") .. text .. (suffix or "")
+end
+
+return Format
+end
+
 __defs["util/glyphs"] = function()
 local Create = require("util/create")
 
@@ -7043,6 +8696,178 @@ function Glyphs.move(parent, size)
 end
 
 return Glyphs
+end
+
+__defs["util/keys"] = function()
+-- Shared key handling for keybinds and the keybind list.
+-- A bind is either an Enum.KeyCode (keyboard or gamepad) or an Enum.UserInputType mouse button.
+local Keys = {}
+
+local function enumItem(enum, name)
+	local ok, item = pcall(function()
+		return enum[name]
+	end)
+	if ok and typeof(item) == "EnumItem" then
+		return item
+	end
+	return nil
+end
+
+-- Mouse buttons the running Roblox build actually exposes. Side buttons are picked up
+-- automatically if the engine ever reports them.
+local MOUSE = {}
+for _, name in ipairs({ "MouseButton1", "MouseButton2", "MouseButton3", "MouseButton4", "MouseButton5" }) do
+	local item = enumItem(Enum.UserInputType, name)
+	if item then
+		MOUSE[name] = item
+	end
+end
+Keys.Mouse = MOUSE
+
+local ALIASES = {
+	LMB = "MouseButton1",
+	LeftClick = "MouseButton1",
+	Mouse1 = "MouseButton1",
+	RMB = "MouseButton2",
+	RightClick = "MouseButton2",
+	Mouse2 = "MouseButton2",
+	MMB = "MouseButton3",
+	MiddleClick = "MouseButton3",
+	Mouse3 = "MouseButton3",
+	Mouse4 = "MouseButton4",
+	Mouse5 = "MouseButton5",
+}
+
+local SHORT = {
+	MouseButton1 = "LMB",
+	MouseButton2 = "RMB",
+	MouseButton3 = "MMB",
+	MouseButton4 = "Mouse4",
+	MouseButton5 = "Mouse5",
+	LeftShift = "LShift",
+	RightShift = "RShift",
+	LeftControl = "LCtrl",
+	RightControl = "RCtrl",
+	LeftAlt = "LAlt",
+	RightAlt = "RAlt",
+	LeftSuper = "LWin",
+	RightSuper = "RWin",
+	Backspace = "Bksp",
+	Return = "Enter",
+	PageUp = "PgUp",
+	PageDown = "PgDn",
+	CapsLock = "Caps",
+	Zero = "0",
+	One = "1",
+	Two = "2",
+	Three = "3",
+	Four = "4",
+	Five = "5",
+	Six = "6",
+	Seven = "7",
+	Eight = "8",
+	Nine = "9",
+	KeypadZero = "Num0",
+	KeypadOne = "Num1",
+	KeypadTwo = "Num2",
+	KeypadThree = "Num3",
+	KeypadFour = "Num4",
+	KeypadFive = "Num5",
+	KeypadSix = "Num6",
+	KeypadSeven = "Num7",
+	KeypadEight = "Num8",
+	KeypadNine = "Num9",
+	ButtonL1 = "LB",
+	ButtonR1 = "RB",
+	ButtonL2 = "LT",
+	ButtonR2 = "RT",
+	ButtonL3 = "LS",
+	ButtonR3 = "RS",
+}
+
+function Keys.isMouse(key)
+	return key ~= nil and key.EnumType == Enum.UserInputType
+end
+
+-- Accepts an Enum.KeyCode, a mouse Enum.UserInputType, or a name such as "F", "MouseButton2", "RMB" or "RightClick".
+-- Returns the EnumItem, or nil for nil / "" / unknown names (unless `strict`, which errors).
+function Keys.parse(value, where, strict)
+	if value == nil or value == "" then
+		return nil
+	end
+	if typeof(value) == "EnumItem" then
+		if value.EnumType == Enum.KeyCode then
+			return value
+		end
+		if value.EnumType == Enum.UserInputType and MOUSE[value.Name] then
+			return value
+		end
+	elseif type(value) == "string" then
+		local name = ALIASES[value] or value
+		if MOUSE[name] then
+			return MOUSE[name]
+		end
+		local key = enumItem(Enum.KeyCode, name)
+		if key and key ~= Enum.KeyCode.Unknown then
+			return key
+		end
+	end
+	if strict then
+		error(("[UI] %s: expected an Enum.KeyCode, a mouse button, or a key name like \"F\" or \"MouseButton2\""):format(where or "Keybind"), 0)
+	end
+	return nil
+end
+
+function Keys.text(key, empty)
+	if not key then
+		return empty or "None"
+	end
+	return SHORT[key.Name] or key.Name
+end
+
+-- The bind an input represents, or nil if it is not bindable (mouse movement, touch, scroll...).
+function Keys.fromInput(input)
+	local kind = input.UserInputType
+	if MOUSE[kind.Name] == kind then
+		return kind
+	end
+	if kind == Enum.UserInputType.Keyboard or string.sub(kind.Name, 1, 7) == "Gamepad" then
+		if input.KeyCode ~= Enum.KeyCode.Unknown then
+			return input.KeyCode
+		end
+	end
+	return nil
+end
+
+-- While any keybind is waiting for a key, presses must not also trigger other binds or the menu key.
+local capturing, captured = 0, nil
+
+function Keys.beginCapture()
+	capturing = capturing + 1
+end
+
+function Keys.endCapture(input)
+	capturing = math.max(capturing - 1, 0)
+	if input then
+		captured = input
+	end
+end
+
+function Keys.blocked(input)
+	return capturing > 0 or (input ~= nil and input == captured)
+end
+
+function Keys.matches(input, key)
+	if not key then
+		return false
+	end
+	if Keys.isMouse(key) then
+		return input.UserInputType == key
+	end
+	return input.KeyCode == key
+end
+
+return Keys
 end
 
 __defs["util/maid"] = function()
@@ -7211,6 +9036,7 @@ return {
 	CoreGui = get("CoreGui"),
 	Workspace = get("Workspace"),
 	GuiService = get("GuiService"),
+	TextService = get("TextService"),
 }
 end
 
@@ -7298,8 +9124,8 @@ local KeyGate = require("core/keygate")
 local Luarmor = require("providers/luarmor")
 local Env = require("util/env")
 
-local VERSION = "0.8.0"
-local BUILD = "f2e0a956f507"
+local VERSION = "0.9.0"
+local BUILD = "fe825384c466"
 
 local Library = {
 	Version = VERSION,
