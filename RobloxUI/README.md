@@ -46,7 +46,7 @@ Created on a card with `card:CreateX(config)`.
 | `CreateChips` | `Options`, `Multi`, `Default` (pill selector) | string, or array when `Multi` |
 | `CreateSlider` | `Min`, `Max`, `Increment`, `Default`, `Suffix` | number |
 | `CreateInput` | `Placeholder`, `Default`, `Numeric` | string or number |
-| `CreateKeybind` | `Default`, `Callback`, `Pressed` | `Enum.KeyCode` |
+| `CreateKeybind` | `Default`, `Callback`, `Pressed`, `Released`, `AllowMouse` | `Enum.KeyCode` or a mouse `Enum.UserInputType` |
 | `CreateColorPicker` | `Default` | `Color3` |
 | `CreateProgress` | `Min`, `Max`, `Value`, `Format` | number |
 | `CreateStat` | `Name`, `Value`, `Style` (change later with `SetStyle`) | text |
@@ -68,6 +68,66 @@ All controls support `Get`, `Set(value, silent)`, `SetName`, `SetDescription`, `
 - `Window:IsOpen()` / `IsVisible()`, `Window:Show()` (same as `Restore`), `Hide()`, `Toggle()`
 
 Minimizing shows a pill on touch devices and a title bar on desktop. The layout scales to the screen and switches to an icon sidebar with one column on narrow displays.
+
+## Keybinds
+
+`CreateKeybind` binds keyboard keys, gamepad buttons and mouse buttons. Click the key box, then press a key, or click in the game (not on the menu) to bind a mouse button. Escape cancels; Backspace or Delete clears.
+
+- Mouse buttons show as `LMB`, `RMB` and `MMB`. Side buttons (`Mouse4`, `Mouse5`) bind automatically if the Roblox client reports them; Roblox does not currently expose them to scripts, so mouse software that maps a side button to a key (for example a numpad key) is the reliable route.
+- `AllowMouse = false` limits a bind to keys.
+- `Pressed` fires on press and `Released` on release; `bind:IsHeld()` tells you whether it is down right now (for hold-to-use features).
+- Presses never trigger binds or the menu key while any keybind is waiting for input.
+- `Default`, `Set` and `Window:SetToggleKey` accept an `EnumItem` or a name: `"F"`, `"MouseButton2"`, `"RMB"`, `"RightClick"`. Save `bind:GetKeyName()` (or `key.Name` from the callback) in configs and pass it straight back to `Set`; `""` means unbound.
+
+`Window:CreateKeybindList{ Title, ShowWhen, Width, Position, Color, Draggable }` shows a floating list of binds. `list:Link{ Name, Toggle = toggle, Keybind = keybind }` lights an entry while its toggle is on and shows its key.
+
+## Stat tracker
+
+`Window:CreateStatTracker(config)` adds a Stats tab and a floating overlay with the same look as the keybind list. The overlay appears while the menu is minimized, can be dragged anywhere, and collapses when you tap its title.
+
+```lua
+local Stats = Window:CreateStatTracker({ Title = "Session", Tab = "Stats" })
+
+Stats:AddLeaderstat("Coins", { Format = "Money", Mode = "Earned" })
+Stats:AddLeaderstat("Level", { Format = "Number", Goal = 100 })
+Stats:AddAttribute("XP")
+local kills = Stats:AddCounter("Kills")
+
+kills:Increment()
+Stats:SetStatus("Farming room 3", "Accent")
+```
+
+Each stat shows its value, how much it changed this session, its rate per hour, and with a `Goal`, a progress bar and an ETA.
+
+| Option | Description |
+|---|---|
+| `Title` | Overlay title (default `Stats`) |
+| `Tab` | Tab name (default `Stats`), an existing tab, or `false` for overlay only |
+| `TabGroup` | Sidebar group for the new tab |
+| `ShowWhen` | `Minimized` (default), `Closed`, `Hidden` or `Always` |
+| `Interval` | Seconds between updates (default 0.5) |
+| `Width`, `Position`, `Draggable` | Overlay size and placement |
+| `SessionCard` | Set `false` to leave out the Session card (clock, status, overlay options, pause, reset) |
+
+`Stats:Add{ ... }` options:
+
+| Option | Description |
+|---|---|
+| `Name`, `Id`, `Group` | Label, unique id (defaults to the name), and the card it goes in (default `Tracked`) |
+| Source | One of `Leaderstat = "Coins"`, `Attribute = "Level"` (on the player, or on `Instance`), `Source = valueObjectOrTextLabel` (or a function returning one), `Get = function() return value end`. No source makes a counter you drive with `Set` / `Increment` |
+| `Format` | `Compact` (1.23K, 15.3M, 2.5Qa; default), `Number` (1,234,567), `Money` ($1.5M), `Time`, `Clock`, `Percent`, `Text`, or a function |
+| `Decimals`, `Prefix`, `Suffix` | Extra formatting |
+| `Mode` | `Net` (default; current minus start) or `Earned` (only increases, so spending or a reset does not cancel progress) |
+| `Goal` | Target value: adds a progress bar and an ETA |
+| `Gain`, `Rate` | Set `false` to hide the session change or the per-hour rate |
+| `Hud`, `Tab` | Set `false` to keep the stat out of the overlay or out of the tab |
+
+Text such as `"$1.5M"`, `"12.3K Coins"` or `"1,234"` is read as a number, so stats can come straight from a game's own labels.
+
+Shortcuts: `AddLeaderstat(name, opts)`, `AddAttribute(name, opts)`, `AddCounter(name, opts)`, and `AddLeaderstats{ Group, Exclude, Format }` to track every leaderstat, including ones the game adds later.
+
+Stat methods: `Get`, `Set`, `Increment(n)`, `GetGained`, `GetRate`, `SetGoal`, `SetName`, `Reset`, `SetVisible`, `SetHud`, `Remove`.
+Tracker methods: `SetStatus(text, style)`, `Pause`, `Resume`, `IsPaused`, `Reset`, `GetElapsed`, `Get(id)`, `GetStats`, `SetShowWhen`, `SetVisible`, `SetCollapsed`, `GetPosition`, `SetPosition`, `SetTitle`, `Destroy`. `tracker.Controls` holds the Session card's controls (`Overlay`, `ShowWhen`, `Pause`, `Reset`) so a config system can save them.
 
 ## Key system
 

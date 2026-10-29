@@ -3,6 +3,7 @@ local Tween = require("util/tween")
 local Drag = require("util/drag")
 local Maid = require("util/maid")
 local Validate = require("util/validate")
+local Keys = require("util/keys")
 
 local KeyList = {}
 KeyList.__index = KeyList
@@ -15,45 +16,12 @@ local COLOR_TOKENS = { Accent = true, Success = true, Warning = true, Danger = t
 
 local SHOW_WHEN = { Minimized = true, Hidden = true, Closed = true, Always = true }
 
-local SHORT = {
-	LeftShift = "LShift",
-	RightShift = "RShift",
-	LeftControl = "LCtrl",
-	RightControl = "RCtrl",
-	LeftAlt = "LAlt",
-	RightAlt = "RAlt",
-	Backspace = "Bksp",
-	Return = "Enter",
-	Zero = "0",
-	One = "1",
-	Two = "2",
-	Three = "3",
-	Four = "4",
-	Five = "5",
-	Six = "6",
-	Seven = "7",
-	Eight = "8",
-	Nine = "9",
-}
-
 local function toKey(value)
-	if value == nil then
-		return nil
-	end
-	if typeof(value) == "EnumItem" then
-		return value
-	end
-	if type(value) == "string" and Enum.KeyCode[value] then
-		return Enum.KeyCode[value]
-	end
-	error("[UI] KeybindList: expected an Enum.KeyCode or a key name like \"F\"", 0)
+	return Keys.parse(value, "KeybindList", true)
 end
 
 local function keyText(key)
-	if not key then
-		return "--"
-	end
-	return SHORT[key.Name] or key.Name
+	return Keys.text(key, "--")
 end
 
 local function checkColor(where, color)

@@ -9,6 +9,8 @@ local Icons = require("core/icons")
 local Tab = require("core/tab")
 local Dock = require("core/dock")
 local KeyList = require("core/keylist")
+local StatTracker = require("core/stattracker")
+local Keys = require("util/keys")
 local Mount = require("util/mount")
 local Effects = require("core/effects")
 local Toast = require("core/toast")
@@ -77,7 +79,7 @@ local function build(cfg, partial)
 		Subtitle = "string",
 		Icon = "string|number",
 		Theme = "string|table",
-		ToggleKey = "EnumItem",
+		ToggleKey = "EnumItem|string",
 		Size = "Vector2",
 		Footer = "string|table",
 		OnClose = "function",
@@ -100,6 +102,7 @@ local function build(cfg, partial)
 	self._maid = Maid.new()
 	partial.self = self
 	self._tabs = {}
+	self._trackers = {}
 	self._groups = {}
 	self._groupOrder = 0
 	self._destroyCallbacks = {}
@@ -109,7 +112,7 @@ local function build(cfg, partial)
 	self._userRail = false
 	self._userScale = cfg.Scale
 	self._uiScale = 1
-	self._toggleKey = cfg.ToggleKey
+	self._toggleKey = Keys.parse(cfg.ToggleKey, "CreateWindow", true)
 	self._size = cfg.Size or Vector2.new(640, 420)
 	self._tabIcons = cfg.TabIcons ~= false
 
@@ -368,7 +371,7 @@ local function build(cfg, partial)
 			local keyLabel = Create.new("TextLabel", {
 				Size = UDim2.fromOffset(0, 22),
 				AutomaticSize = Enum.AutomaticSize.X,
-				Text = cfg.ToggleKey.Name,
+				Text = Keys.text(self._toggleKey),
 				TextXAlignment = Enum.TextXAlignment.Center,
 				Parent = badge,
 			})
@@ -629,10 +632,10 @@ local function build(cfg, partial)
 		self:_queueLayout()
 	end))
 	self._maid:Give(UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or not self._toggleKey then
+		if processed or not self._toggleKey or Keys.blocked(input) then
 			return
 		end
-		if input.KeyCode == self._toggleKey then
+		if Keys.matches(input, self._toggleKey) then
 			self:Toggle()
 		end
 	end))
@@ -845,6 +848,11 @@ function Window:_placeFab()
 	if self._keylist and self._keylist.Frame.Visible then
 		self._keylist:_place()
 	end
+	for _, tracker in ipairs(self._trackers) do
+		if tracker.Frame.Visible then
+			tracker:_place()
+		end
+	end
 end
 
 function Window:_transition(state)
@@ -852,6 +860,9 @@ function Window:_transition(state)
 	self._state = state
 	if self._keylist then
 		self._keylist:_sync()
+	end
+	for _, tracker in ipairs(self._trackers) do
+		tracker:_sync()
 	end
 	self._token = self._token + 1
 	local token = self._token
@@ -930,9 +941,10 @@ function Window:Show()
 end
 
 function Window:SetToggleKey(keyCode)
+	keyCode = Keys.parse(keyCode, "SetToggleKey", true)
 	self._toggleKey = keyCode
 	if self._keyBadge then
-		self._keyBadge.Text = keyCode and keyCode.Name or "None"
+		self._keyBadge.Text = Keys.text(keyCode)
 	end
 end
 
@@ -1134,6 +1146,30 @@ end
 
 function Window:GetKeybindList()
 	return self._keylist
+end
+
+-- A Stats tab plus a floating overlay that shows while the window is minimized. See core/stattracker.lua.
+function Window:CreateStatTracker(cfg)
+	if self._destroyed then
+		return nil
+	end
+	local tracker = StatTracker.new(self, cfg or {})
+	self._trackers[#self._trackers + 1] = tracker
+	tracker:_sync()
+	return tracker
+end
+
+function Window:GetStatTracker(index)
+	return self._trackers[index or 1]
+end
+
+function Window:_removeTracker(tracker)
+	for i, item in ipairs(self._trackers) do
+		if item == tracker then
+			table.remove(self._trackers, i)
+			break
+		end
+	end
 end
 
 function Window:Confirm(cfg)
