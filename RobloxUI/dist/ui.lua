@@ -2949,7 +2949,12 @@ local function buildPill(self, window, cfg)
 	local contentList = Create.List(content, Enum.FillDirection.Horizontal, 10)
 	contentList.VerticalAlignment = Enum.VerticalAlignment.Center
 	Create.Padding(content, 14, 0, 20, 0)
-	local icon = Icons.Make(content, cfg.FabIcon or cfg.Icon, cfg.Title, 24, { Tint = false, Corner = 6, Theme = theme })
+	local icon = Icons.Make(content, cfg.FabIcon or cfg.Icon, cfg.Title, 24, {
+		Tint = false,
+		Corner = 6,
+		Theme = theme,
+		Placeholder = window._placeholder,
+	})
 	icon.Frame.LayoutOrder = 1
 	local title = Create.new("TextLabel", {
 		Name = "Title",
@@ -2991,7 +2996,12 @@ local function buildBar(self, window, cfg)
 	styleShell(theme, frame)
 	theme:Corner(frame, "Window")
 
-	local icon = Icons.Make(frame, cfg.FabIcon or cfg.Icon, cfg.Title, 26, { Tint = false, Corner = 6, Theme = theme })
+	local icon = Icons.Make(frame, cfg.FabIcon or cfg.Icon, cfg.Title, 26, {
+		Tint = false,
+		Corner = 6,
+		Theme = theme,
+		Placeholder = window._placeholder,
+	})
 	icon.Frame.AnchorPoint = Vector2.new(0, 0.5)
 	icon.Frame.Position = UDim2.new(0, 12, 0.5, 0)
 	window._maid:Give(theme:Watch(function(t)
@@ -3060,7 +3070,7 @@ local function buildBar(self, window, cfg)
 	actionButton(window, actions, 3, function(parent)
 		return Glyphs.cross(parent, 16)
 	end, "Danger", function()
-		window:Destroy()
+		window:RequestClose()
 	end)
 
 	self.Frame = frame
@@ -3470,6 +3480,9 @@ end
 function Icons.Make(parent, icon, fallback, size, opts)
 	opts = opts or {}
 	local kind, value, pending = describeValue(icon, 0)
+	if pending and opts.Placeholder ~= nil then
+		kind, value = describeValue(opts.Placeholder, 0)
+	end
 	local frame = Create.new("Frame", {
 		Name = "Icon",
 		BackgroundTransparency = 1,
@@ -6536,7 +6549,8 @@ Window.__index = Window
 
 local MIN_W, MIN_H = 300, 220
 local EDGE = 8
-local AUTO_W, AUTO_H, AUTO_MIN = 760, 480, 0.6
+local FIT_W, FIT_H, FIT_FLOOR = 620, 340, 0.6
+local DEFAULT_ICON = "https://github.com/destoryher/imageui/blob/main/imageui.png?raw=true"
 local TWO_COLUMN_MIN = 420
 local CLOSE = "\u{00D7}"
 local MINIMIZE = "\u{2013}"
@@ -6608,10 +6622,13 @@ local function build(cfg, partial)
 		Mark = "string",
 		TabIcons = "boolean",
 		Glow = "number",
+		ConfirmClose = "boolean",
 	})
 
-	cfg.Icon = cfg.Icon or ("mark:" .. string.lower(cfg.Mark or "cross"))
+	local markName = string.lower(cfg.Mark or "cross")
+	cfg.Icon = cfg.Icon or (cfg.Mark and ("mark:" .. markName) or DEFAULT_ICON)
 	local self = setmetatable({}, Window)
+	self._placeholder = "mark:" .. markName
 	self._maid = Maid.new()
 	partial.self = self
 	self._tabs = {}
@@ -6726,6 +6743,7 @@ local function build(cfg, partial)
 		Tint = false,
 		Corner = 8,
 		Theme = theme,
+		Placeholder = self._placeholder,
 		OnChange = function()
 			styleBrand()
 		end,
@@ -7050,7 +7068,7 @@ local function build(cfg, partial)
 	})
 	self.Pages = pages
 
-	local gripSize = touch and 30 or 22
+	local gripSize = 22
 	local grip = Create.new("TextButton", {
 		Name = "ResizeGrip",
 		AnchorPoint = Vector2.new(1, 1),
@@ -7073,6 +7091,11 @@ local function build(cfg, partial)
 	end
 
 	self._cfg, self._touch = cfg, touch
+	if cfg.ConfirmClose == nil then
+		self._confirmClose = touch
+	else
+		self._confirmClose = cfg.ConfirmClose
+	end
 	self:_buildDock(self:_resolveDockMode(cfg.MinimizeStyle or "Auto"))
 
 	self._overlay = Create.new("Frame", {
@@ -7119,7 +7142,7 @@ local function build(cfg, partial)
 		self:Minimize()
 	end))
 	self._maid:Give(closeButton.Activated:Connect(function()
-		self:Destroy()
+		self:RequestClose()
 	end))
 	self._maid:Give(hamburger.Activated:Connect(function()
 		self:SetSidebarCollapsed(not self._userRail)
@@ -7198,7 +7221,7 @@ function Window:_updateScale()
 	local abs = self._gui.AbsoluteSize
 	local scale = self._userScale
 	if not scale then
-		scale = math.clamp(math.min(abs.Y / AUTO_H, abs.X / AUTO_W), AUTO_MIN, 1)
+		scale = math.clamp(math.min(abs.X / FIT_W, abs.Y / FIT_H), FIT_FLOOR, 1)
 	end
 	scale = math.clamp(scale, 0.5, 2)
 	self._uiScale = scale
@@ -7753,6 +7776,31 @@ end
 
 function Window:_onDestroy(fn)
 	self._destroyCallbacks[#self._destroyCallbacks + 1] = fn
+end
+
+function Window:RequestClose()
+	if self._destroyed then
+		return
+	end
+	if not self._confirmClose or self._closing then
+		self:Destroy()
+		return
+	end
+	self._closing = true
+	self:Confirm({
+		Title = "Close " .. tostring(self._cfg.Title) .. "?",
+		Content = "This stops the script and removes the window.",
+		ConfirmText = "Close",
+		CancelText = "Cancel",
+		Danger = true,
+		OnConfirm = function()
+			self._closing = false
+			self:Destroy()
+		end,
+		OnCancel = function()
+			self._closing = false
+		end,
+	})
 end
 
 function Window:Destroy()
@@ -9124,8 +9172,8 @@ local KeyGate = require("core/keygate")
 local Luarmor = require("providers/luarmor")
 local Env = require("util/env")
 
-local VERSION = "0.9.0"
-local BUILD = "fe825384c466"
+local VERSION = "0.9.4"
+local BUILD = "093a4ad71750"
 
 local Library = {
 	Version = VERSION,
